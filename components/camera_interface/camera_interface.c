@@ -27,13 +27,13 @@ static camera_config_t camera_config = {
     .pin_href = HREF_GPIO_NUM,
     .pin_pclk = PCLK_GPIO_NUM,
 
-    .xclk_freq_hz = 20000000,           // The clock frequency of the image sensor
-    .fb_location = CAMERA_FB_IN_PSRAM,  // Set the frame buffer storage location
-    .pixel_format = PIXFORMAT_JPEG,     // The pixel format of the image: PIXFORMAT_ + YUV422|GRAYSCALE|RGB565|JPEG
-    .frame_size = FRAMESIZE_UXGA,       // The resolution size of the image: FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
-    .jpeg_quality = 15,                 // The quality of the JPEG image, ranging from 0 to 63.
-    .fb_count = 2,                      // The number of frame buffers to use.
-    .grab_mode = CAMERA_GRAB_LATEST //  The image capture mode.
+    .xclk_freq_hz = 20000000,          // The clock frequency of the image sensor
+    .fb_location = CAMERA_FB_IN_PSRAM, // Set the frame buffer storage location
+    .pixel_format = PIXFORMAT_JPEG,    // The pixel format of the image: PIXFORMAT_ + YUV422|GRAYSCALE|RGB565|JPEG
+    .frame_size = FRAMESIZE_UXGA,      // The resolution size of the image: FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
+    .jpeg_quality = 15,                // The quality of the JPEG image, ranging from 0 to 63.
+    .fb_count = 2,                     // The number of frame buffers to use.
+    .grab_mode = CAMERA_GRAB_LATEST    //  The image capture mode.
 };
 
 void initialize_camera(void)
@@ -80,13 +80,15 @@ void takePicture()
     ESP_LOGI(cameraTag, "Taking picture...");
     camera_fb_t *pic = esp_camera_fb_get();
 
-    if (pic)
+    if (!pic)
     {
-        saveJpegToSdcard(pic); // Adjust quality as needed
+        ESP_LOGE(cameraTag, "Camera capture failed");
+        return;
     }
 
-    // use pic->buf to access the image
     ESP_LOGI(cameraTag, "Picture taken! Its size was: %zu bytes", pic->len);
+
+    saveJpegToSdcard(pic); // Assuming this function returns esp_err_t
 
     esp_camera_fb_return(pic);
 }
