@@ -98,6 +98,7 @@ void cameraTakePicture_5_sec(void *pvParameters)
     for (;;)
     {
         takePicture();
+
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }

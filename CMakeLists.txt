@@ -4,7 +4,8 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 set(EXTRA_COMPONENT_DIRS $ENV{IDF_PATH}/components)
+set(PARTITION_TABLE_CSV "partitions.csv")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-project(Camera-and-SdCard-FreeRTOS)
+project(SPAIA_field_agent)

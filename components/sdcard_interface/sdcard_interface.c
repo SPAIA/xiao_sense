@@ -8,6 +8,7 @@
 
 #include "sdcard_config.h"
 #include "sdcard_interface.h"
+// #include "file_upload"
 
 const char sdcardTag[7] = "sdcard";
 
@@ -132,6 +133,7 @@ void saveJpegToSdcard(camera_fb_t *captureImage)
         fwrite(captureImage->buf, 1, captureImage->len, fp);
         fclose(fp);
         ESP_LOGI(sdcardTag, "JPEG saved as %s", filename);
+        // queue_file_upload(filename), "https://your-server.com/upload");
     }
     else
     {
