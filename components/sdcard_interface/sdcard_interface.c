@@ -8,7 +8,7 @@
 
 #include "sdcard_config.h"
 #include "sdcard_interface.h"
-// #include "file_upload"
+#include "file_upload.h"
 
 const char sdcardTag[7] = "sdcard";
 
@@ -133,7 +133,8 @@ void saveJpegToSdcard(camera_fb_t *captureImage)
         fwrite(captureImage->buf, 1, captureImage->len, fp);
         fclose(fp);
         ESP_LOGI(sdcardTag, "JPEG saved as %s", filename);
-        // queue_file_upload(filename), "https://your-server.com/upload");
+        vTaskDelay(pdMS_TO_TICKS(500));
+        queue_file_upload(filename, "https://device.spaia.earth/image");
     }
     else
     {

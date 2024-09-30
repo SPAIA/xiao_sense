@@ -13,6 +13,10 @@ Set WiFi Password.
 
 You fursther need to enable the option "Support for external, SPI-connected RAM" annd change "Mode (QUAD/OCT) of SPI RAM chip in use" to "octalmode PSRAM"
 
+Set the custom partion table csv to partitions.csv
+
+Make sure you have the ESP certificate bundle enabled in your project configuration. You can do this in menuconfig under "Component config" -> "ESP-TLS" -> "Use Certificate Bundle".
+
 Camera and Sdcard mapped for Xiao ESP32-S3 (Sense)   
 
 # Pin Map
