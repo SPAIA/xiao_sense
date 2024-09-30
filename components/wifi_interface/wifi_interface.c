@@ -22,6 +22,8 @@
 #include "wifi_config.h"
 #include "wifi_interface.h"
 
+#include "esp_netif.h"
+
 /* The examples use WiFi configuration that you can set via project configuration menu
 
    If you'd rather not, just change the below entries to strings with
@@ -73,6 +75,12 @@ static void event_handler(void *arg, esp_event_base_t event_base,
 
 void wifi_init_sta(void)
 {
+    esp_log_level_set("wifi", ESP_LOG_VERBOSE);
+    esp_log_level_set("wifi_init", ESP_LOG_VERBOSE);
+    esp_log_level_set("wpa", ESP_LOG_VERBOSE);
+    esp_log_level_set("wpa_supplicant", ESP_LOG_VERBOSE);
+    esp_log_level_set("esp_netif_handlers", ESP_LOG_VERBOSE);
+    esp_log_level_set("system_api", ESP_LOG_VERBOSE);
     s_wifi_event_group = xEventGroupCreate();
 
     ESP_ERROR_CHECK(esp_netif_init());
@@ -115,7 +123,7 @@ void wifi_init_sta(void)
     };
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-
+    esp_wifi_set_ps(WIFI_PS_NONE);
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "wifi_init_sta finished.");
@@ -134,6 +142,19 @@ void wifi_init_sta(void)
     {
         ESP_LOGI(TAG, "connected to ap SSID:%s password:%s",
                  EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
+        esp_netif_ip_info_t ip_info;
+        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (netif)
+        {
+            ESP_ERROR_CHECK(esp_netif_get_ip_info(netif, &ip_info));
+            ESP_LOGI(TAG, "IP Address: " IPSTR, IP2STR(&ip_info.ip));
+            ESP_LOGI(TAG, "Subnet Mask: " IPSTR, IP2STR(&ip_info.netmask));
+            ESP_LOGI(TAG, "Gateway: " IPSTR, IP2STR(&ip_info.gw));
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Failed to get netif handle");
+        }
     }
     else if (bits & WIFI_FAIL_BIT)
     {

@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "camera_config.h"
 #include "camera_interface.h"
+#include "img_converters.h"
 
 const char cameraTag[7] = "camera";
 
@@ -51,28 +52,30 @@ void initialize_camera(void)
 
     sensor_t *s = esp_camera_sensor_get();
 
-    s->set_brightness(s, 0);                 // -2 to 2
-    s->set_contrast(s, 0);                   // -2 to 2
-    s->set_saturation(s, 0);                 // -2 to 2
-    s->set_special_effect(s, 0);             // 0 to 6 (0 - No Effect, 1 - Negative, 2 - Grayscale, 3 - Red Tint, 4 - Green Tint, 5 - Blue Tint, 6 - Sepia)
-    s->set_whitebal(s, 1);                   // 0 = disable , 1 = enable
-    s->set_awb_gain(s, 1);                   // 0 = disable , 1 = enable
-    s->set_wb_mode(s, 0);                    // 0 to 4 - if awb_gain enabled (0 - Auto, 1 - Sunny, 2 - Cloudy, 3 - Office, 4 - Home)
-    s->set_exposure_ctrl(s, 1);              // 0 = disable , 1 = enable
-    s->set_aec2(s, 0);                       // 0 = disable , 1 = enable
-    s->set_ae_level(s, 0);                   // -2 to 2
-    s->set_aec_value(s, 300);                // 0 to 1200
-    s->set_gain_ctrl(s, 1);                  // 0 = disable , 1 = enable
-    s->set_agc_gain(s, 0);                   // 0 to 30
-    s->set_gainceiling(s, (gainceiling_t)0); // 0 to 6
-    s->set_bpc(s, 0);                        // 0 = disable , 1 = enable
-    s->set_wpc(s, 1);                        // 0 = disable , 1 = enable
-    s->set_raw_gma(s, 1);                    // 0 = disable , 1 = enable
-    s->set_lenc(s, 1);                       // 0 = disable , 1 = enable
-    s->set_hmirror(s, 0);                    // 0 = disable , 1 = enable
-    s->set_vflip(s, 0);                      // 0 = disable , 1 = enable
-    s->set_dcw(s, 1);                        // 0 = disable , 1 = enable
-    s->set_colorbar(s, 0);                   // 0 = disable , 1 = enable
+    // s->set_framesize(s, FRAMESIZE_SXGA);   // Higher resolution for more detail
+    s->set_quality(s, 10);                 // Lower quality (0-63) for faster processing
+    s->set_brightness(s, 0);               // Normal brightness
+    s->set_contrast(s, 1);                 // Slightly increased contrast
+    s->set_saturation(s, 1);               // Slightly increased saturation
+    s->set_sharpness(s, 2);                // Increased sharpness (if available)
+    s->set_denoise(s, 1);                  // Enable denoise (if available)
+    s->set_whitebal(s, 1);                 // Enable white balance
+    s->set_awb_gain(s, 1);                 // Enable auto white balance gain
+    s->set_wb_mode(s, 0);                  // Auto white balance mode
+    s->set_exposure_ctrl(s, 1);            // Enable auto exposure
+    s->set_aec2(s, 1);                     // Enable AEC DSP
+    s->set_ae_level(s, 0);                 // Auto exposure level 0
+    s->set_aec_value(s, 300);              // Lower exposure time for faster shutter
+    s->set_gain_ctrl(s, 1);                // Enable auto gain control
+    s->set_agc_gain(s, 0);                 // Lower gain to reduce noise
+    s->set_gainceiling(s, GAINCEILING_2X); // Set gain ceiling to 2X
+    s->set_bpc(s, 1);                      // Enable black pixel correct
+    s->set_wpc(s, 1);                      // Enable white pixel correct
+    s->set_raw_gma(s, 1);                  // Enable raw GMA
+    s->set_lenc(s, 1);                     // Enable lens correction
+    s->set_hmirror(s, 0);                  // Disable horizontal mirror
+    s->set_vflip(s, 0);                    // Disable vertical flip
+    s->set_dcw(s, 1);                      // 0 = disable , 1 = enable
 }
 
 void takePicture()
@@ -102,16 +105,118 @@ void cameraTakePicture_5_sec(void *pvParameters)
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
+bool detect_motion(camera_fb_t *prev_frame, camera_fb_t *current_frame, float threshold)
+{
+    if (!prev_frame || !current_frame || prev_frame->len != current_frame->len)
+    {
+        return false;
+    }
+
+    int changed_pixels = 0;
+    for (size_t i = 0; i < prev_frame->len; i++)
+    {
+        if (abs(prev_frame->buf[i] - current_frame->buf[i]) > 25) // Adjust sensitivity as needed
+        {
+            changed_pixels++;
+        }
+    }
+
+    float change_percent = (float)changed_pixels / (prev_frame->width * prev_frame->height);
+    return change_percent > threshold;
+}
+void motion_detection_task(void *pvParameters)
+{
+    camera_fb_t *prev_frame = NULL;
+    camera_fb_t *current_frame = NULL;
+    float motion_threshold = 0.1; // Adjust this value to change motion sensitivity
+
+    // Change camera settings for motion detection
+    sensor_t *s = esp_camera_sensor_get();
+    s->set_framesize(s, FRAMESIZE_QVGA);      // Lower resolution for faster processing
+    s->set_pixformat(s, PIXFORMAT_GRAYSCALE); // Grayscale for simpler processing
+
+    while (1)
+    {
+        current_frame = esp_camera_fb_get();
+        if (!current_frame)
+        {
+            ESP_LOGE(cameraTag, "Camera capture failed");
+            continue;
+        }
+
+        if (prev_frame)
+        {
+            if (detect_motion(prev_frame, current_frame, motion_threshold))
+            {
+                ESP_LOGI(cameraTag, "Motion detected!");
+                // Add your motion detection handling code here
+                // For example, you could trigger an alert or start recording
+            }
+
+            esp_camera_fb_return(prev_frame);
+        }
+
+        prev_frame = current_frame;
+        vTaskDelay(100 / portTICK_PERIOD_MS); // Adjust delay as needed
+    }
+}
+
+void motion_detection_task(void *pvParameters)
+{
+    camera_fb_t *prev_frame = NULL;
+    camera_fb_t *current_frame = NULL;
+    float motion_threshold = 0.1; // Adjust this value to change motion sensitivity
+
+    // Change camera settings for motion detection
+    sensor_t *s = esp_camera_sensor_get();
+    s->set_framesize(s, FRAMESIZE_QVGA);      // Lower resolution for faster processing
+    s->set_pixformat(s, PIXFORMAT_GRAYSCALE); // Grayscale for simpler processing
+
+    while (1)
+    {
+        current_frame = esp_camera_fb_get();
+        if (!current_frame)
+        {
+            ESP_LOGE(cameraTag, "Camera capture failed");
+            continue;
+        }
+
+        if (prev_frame)
+        {
+            if (detect_motion(prev_frame, current_frame, motion_threshold))
+            {
+                ESP_LOGI(cameraTag, "Motion detected!");
+                // Add your motion detection handling code here
+                // For example, you could trigger an alert or start recording
+            }
+
+            esp_camera_fb_return(prev_frame);
+        }
+
+        prev_frame = current_frame;
+        vTaskDelay(100 / portTICK_PERIOD_MS); // Adjust delay as needed
+    }
+}
 
 void createCameraTask()
 {
-    TaskHandle_t task;
+    TaskHandle_t picture_task;
     xTaskCreate(
-        cameraTakePicture_5_sec,      /* Function that implements the task. */
-        "cameraTakePicture_5_sec",    /* Text name for the task. */
-        configMINIMAL_STACK_SIZE * 4, /* Stack size in words, or bytes. */
-        NULL,                         /* Parameter passed into the task. */
-        tskIDLE_PRIORITY,             /* Priority at which the task is created. */
-        &task                         /* Used to pass out the created task's handle. */
+        cameraTakePicture_5_sec,
+        "cameraTakePicture_5_sec",
+        configMINIMAL_STACK_SIZE * 4,
+        NULL,
+        tskIDLE_PRIORITY,
+        &picture_task);
+
+    TaskHandle_t motion_task;
+    xTaskCreatePinnedToCore(
+        motion_detection_task,
+        "motion_detection_task",
+        configMINIMAL_STACK_SIZE * 4,
+        NULL,
+        tskIDLE_PRIORITY + 1, // Higher priority than the picture task
+        &motion_task,
+        0 // Pin to Core 0 (main core)
     );
 }
