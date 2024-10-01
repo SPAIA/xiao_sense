@@ -28,11 +28,37 @@ static camera_config_t camera_config = {
     .pin_href = HREF_GPIO_NUM,
     .pin_pclk = PCLK_GPIO_NUM,
 
+    .xclk_freq_hz = 10000000,            // The clock frequency of the image sensor
+    .fb_location = CAMERA_FB_IN_PSRAM,   // Set the frame buffer storage location
+    .pixel_format = PIXFORMAT_GRAYSCALE, // The pixel format of the image: PIXFORMAT_ + YUV422|GRAYSCALE|RGB565|JPEG
+    .frame_size = FRAMESIZE_QVGA,        // The resolution size of the image: FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
+    .jpeg_quality = 12,                  // The quality of the JPEG image, ranging from 0 to 63.
+    .fb_count = 2,                       // The number of frame buffers to use.
+    .grab_mode = CAMERA_GRAB_WHEN_EMPTY  //  The image capture mode.
+};
+static camera_config_t camera_config_hires = {
+    .pin_pwdn = PWDN_GPIO_NUM,
+    .pin_reset = RESET_GPIO_NUM,
+    .pin_xclk = XCLK_GPIO_NUM,
+    .pin_sccb_sda = SIOD_GPIO_NUM,
+    .pin_sccb_scl = SIOC_GPIO_NUM,
+    .pin_d7 = Y9_GPIO_NUM,
+    .pin_d6 = Y8_GPIO_NUM,
+    .pin_d5 = Y7_GPIO_NUM,
+    .pin_d4 = Y6_GPIO_NUM,
+    .pin_d3 = Y5_GPIO_NUM,
+    .pin_d2 = Y4_GPIO_NUM,
+    .pin_d1 = Y3_GPIO_NUM,
+    .pin_d0 = Y2_GPIO_NUM,
+    .pin_vsync = VSYNC_GPIO_NUM,
+    .pin_href = HREF_GPIO_NUM,
+    .pin_pclk = PCLK_GPIO_NUM,
+
     .xclk_freq_hz = 10000000,           // The clock frequency of the image sensor
     .fb_location = CAMERA_FB_IN_PSRAM,  // Set the frame buffer storage location
     .pixel_format = PIXFORMAT_JPEG,     // The pixel format of the image: PIXFORMAT_ + YUV422|GRAYSCALE|RGB565|JPEG
-    .frame_size = FRAMESIZE_UXGA,       // The resolution size of the image: FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
-    .jpeg_quality = 15,                 // The quality of the JPEG image, ranging from 0 to 63.
+    .frame_size = FRAMESIZE_XGA,        // The resolution size of the image: FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
+    .jpeg_quality = 12,                 // The quality of the JPEG image, ranging from 0 to 63.
     .fb_count = 2,                      // The number of frame buffers to use.
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY //  The image capture mode.
 };
@@ -52,8 +78,11 @@ void initialize_camera(void)
 
     // Initial camera settings for motion detection
     sensor_t *s = esp_camera_sensor_get();
-    s->set_framesize(s, FRAMESIZE_QVGA);      // Lower resolution for faster processing
-    s->set_pixformat(s, PIXFORMAT_GRAYSCALE); // Grayscale for simpler processing
+    if (s == NULL)
+    {
+        ESP_LOGE(cameraTag, "Failed to acquire sensor");
+        return;
+    }
 
     // Other settings remain the same
     s->set_quality(s, 10);
@@ -81,34 +110,19 @@ void initialize_camera(void)
     s->set_dcw(s, 1);
 }
 
-bool capture_frame(camera_fb_t **fb)
-{
-    *fb = esp_camera_fb_get();
-    if (*fb == NULL)
-    {
-        ESP_LOGE(cameraTag, "Camera capture failed");
-        return false;
-    }
-    return true;
-}
-
-void release_frame(camera_fb_t *fb)
-{
-    if (fb != NULL)
-    {
-        esp_camera_fb_return(fb);
-    }
-}
-
 void takeHighResPhoto()
 {
     ESP_LOGI(cameraTag, "Taking high-resolution picture...");
 
-    sensor_t *s = esp_camera_sensor_get();
-    s->set_framesize(s, FRAMESIZE_UXGA); // Set to high resolution
-    s->set_pixformat(s, PIXFORMAT_JPEG); // Set to JPEG format
+    // Reconfigure and reinitialize the camera for high-res capture
+    esp_camera_deinit();                  // Deinit the current camera config
+    vTaskDelay(100 / portTICK_PERIOD_MS); // Short delay
 
-    vTaskDelay(100 / portTICK_PERIOD_MS); // Short delay for settings to take effect
+    if (esp_camera_init(&camera_config_hires) != ESP_OK) // Reinitialize with high-res config
+    {
+        ESP_LOGE(cameraTag, "Failed to reinitialize camera for high-res photo");
+        return;
+    }
 
     camera_fb_t *pic = esp_camera_fb_get();
 
@@ -123,10 +137,15 @@ void takeHighResPhoto()
     saveJpegToSdcard(pic); // Save the high-res photo
 
     esp_camera_fb_return(pic);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+    esp_camera_deinit();                  // Deinit the current camera config
+    vTaskDelay(100 / portTICK_PERIOD_MS); // Short delay
 
-    // Reset camera to motion detection settings
-    s->set_framesize(s, FRAMESIZE_QVGA);
-    s->set_pixformat(s, PIXFORMAT_GRAYSCALE);
+    if (esp_camera_init(&camera_config) != ESP_OK) // Reinitialize with high-res config
+    {
+        ESP_LOGE(cameraTag, "Failed to reinitialize camera for high-res photo");
+        return;
+    }
 
     vTaskDelay(100 / portTICK_PERIOD_MS); // Short delay for settings to take effect
 }
@@ -135,6 +154,7 @@ bool detect_motion(camera_fb_t *prev_frame, camera_fb_t *current_frame, float th
 {
     if (!prev_frame || !current_frame || prev_frame->len != current_frame->len)
     {
+        ESP_LOGI(cameraTag, "frame error");
         return false;
     }
 
@@ -155,31 +175,32 @@ void motion_detection_task(void *pvParameters)
 {
     camera_fb_t *prev_frame = NULL;
     camera_fb_t *current_frame = NULL;
-    float motion_threshold = 0.1;
-
-    vTaskDelay(2000 / portTICK_PERIOD_MS); // Initial delay to ensure camera is ready
+    float motion_threshold = 0.1; // Adjust this value to change motion sensitivity
 
     while (1)
     {
-        if (!capture_frame(&current_frame))
+        current_frame = esp_camera_fb_get();
+        if (!current_frame)
         {
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            ESP_LOGE(cameraTag, "Camera capture failed");
+            vTaskDelay(100 / portTICK_PERIOD_MS);
             continue;
         }
 
         if (prev_frame)
         {
+
             if (detect_motion(prev_frame, current_frame, motion_threshold))
             {
                 ESP_LOGI(cameraTag, "Motion detected! Taking high-res photo...");
                 takeHighResPhoto();
             }
 
-            release_frame(prev_frame);
+            esp_camera_fb_return(prev_frame);
         }
 
         prev_frame = current_frame;
-        vTaskDelay(200 / portTICK_PERIOD_MS); // Increased delay between captures
+        vTaskDelay(100 / portTICK_PERIOD_MS); // Adjust delay as needed
     }
 }
 

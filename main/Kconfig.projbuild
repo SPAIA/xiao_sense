@@ -1,5 +1,11 @@
 menu "SPAIA Configuration"
 
+    config SPAIA_DEVICE_ID
+        string "SPAIA Device ID"
+        default "demo"
+        help
+            Log on to dashboard.spaia.earth to register your device.
+
     config ESP_WIFI_SSID
         string "WiFi SSID"
         default "myssid"
