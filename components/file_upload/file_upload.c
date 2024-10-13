@@ -131,7 +131,7 @@ void file_upload_task(void *pvParameters)
             if (stat(request.filepath, &st) == 0)
             {
                 ESP_LOGI(TAG, "File exists, starting upload: %s", request.filepath);
-                esp_err_t result = upload_file_to_https(request.filepath, request.url, 'test');
+                esp_err_t result = upload_file_to_https(request.filepath, request.url, "test");
                 if (result == ESP_OK)
                 {
                     ESP_LOGI(TAG, "Upload completed successfully");

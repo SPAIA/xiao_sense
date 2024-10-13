@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <sys/unistd.h>
 #include <sys/stat.h>
 #include "esp_vfs_fat.h"
@@ -87,6 +88,26 @@ void initialize_sdcard()
     // Card has been initialized, print its properties
     sdmmc_card_print_info(stdout, card);
 
+    // Create "spaia" folder if it doesn't exist
+    const char *spaia_folder = "/sd/spaia";
+    struct stat st;
+    if (stat(spaia_folder, &st) != 0)
+    {
+        // Folder doesn't exist, create it
+        if (mkdir(spaia_folder, 0755) != 0)
+        {
+            ESP_LOGE(sdcardTag, "Failed to create 'spaia' folder");
+        }
+        else
+        {
+            ESP_LOGI(sdcardTag, "'spaia' folder created successfully");
+        }
+    }
+    else
+    {
+        ESP_LOGI(sdcardTag, "'spaia' folder already exists");
+    }
+
     // Format FATFS
 #ifdef FORMAT_SD_CARD
     ret = esp_vfs_fat_sdcard_format(mount_point, card);
@@ -118,13 +139,62 @@ void deinitialise_sdcard()
     spi_bus_free(host.slot);
 }
 
+void append_data_to_csv(float temperature, float humidity, float pressure, const char *bboxes)
+{
+    time_t now;
+    struct tm timeinfo;
+    char filename[64];
+    char filepath[128];
+
+    // Get current time
+    time(&now);
+    localtime_r(&now, &timeinfo);
+
+    // Generate filename based on current date
+    strftime(filename, sizeof(filename), "%d-%m-%y.csv", &timeinfo);
+
+    // Construct full filepath
+    snprintf(filepath, sizeof(filepath), "%s/%s", mount_point, filename);
+
+    FILE *file = fopen(filepath, "r"); // Try to open the file in read mode first
+    bool file_exists = (file != NULL);
+
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+
+    file = fopen(filepath, "a"); // Open the file in append mode
+
+    if (file == NULL)
+    {
+        ESP_LOGE(sdcardTag, "Failed to open file for appending: %s", filepath);
+        return;
+    }
+
+    // If the file didn't exist, write the header
+    if (!file_exists)
+    {
+        fprintf(file, "timestamp,temperature,humidity,pressure,bboxes\n");
+        ESP_LOGI(sdcardTag, "Created new CSV file with header: %s", filepath);
+    }
+
+    // Write the data to the CSV file
+    fprintf(file, "%lld,%f,%f,%f,%s\n",
+            (long long)now, temperature, humidity, pressure, bboxes ? bboxes : "");
+
+    // Close the file
+    fclose(file);
+    ESP_LOGI(sdcardTag, "Data appended successfully to CSV file: %s", filepath);
+}
+
 void saveJpegToSdcard(camera_fb_t *captureImage)
 {
 
     // Find the next available filename
     char filename[32];
 
-    sprintf(filename, "%s/%u_img.jpg", mount_point, lastKnownFile++);
+    sprintf(filename, "%s/spaia/%u_img.jpg", mount_point, lastKnownFile++);
 
     // Create the file and write the JPEG data
     FILE *fp = fopen(filename, "wb");
@@ -134,10 +204,15 @@ void saveJpegToSdcard(camera_fb_t *captureImage)
         fclose(fp);
         ESP_LOGI(sdcardTag, "JPEG saved as %s", filename);
         vTaskDelay(pdMS_TO_TICKS(500));
-        queue_file_upload(filename, "https://device.spaia.earth/image");
+        // queue_file_upload(filename, "https://device.spaia.earth/image");
     }
     else
     {
         ESP_LOGE(sdcardTag, "Failed to create file: %s", filename);
     }
+}
+
+void create_data_log_queue()
+{
+    sensor_data_queue = xQueueCreate(10, sizeof(sensor_data_t));
 }

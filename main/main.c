@@ -3,6 +3,7 @@
 #include "sdcard_interface.h"
 #include "wifi_interface.h"
 #include "file_upload.h"
+#include "climate_interface.h"
 
 void initialize_drivers()
 {
@@ -23,4 +24,5 @@ void app_main(void)
     initialize_drivers();
     vTaskDelay(pdMS_TO_TICKS(500));
     start_tasks();
+    init_climate();
 }
