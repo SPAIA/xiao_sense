@@ -17,6 +17,7 @@ void initialize_drivers()
 void start_tasks()
 {
     createCameraTask();
+    create_data_log_queue();
 }
 
 void app_main(void)

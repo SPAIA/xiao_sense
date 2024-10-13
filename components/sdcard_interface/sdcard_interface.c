@@ -13,6 +13,8 @@
 
 const char sdcardTag[7] = "sdcard";
 
+QueueHandle_t sensor_data_queue = NULL;
+
 uint16_t lastKnownFile = 0;
 
 sdmmc_card_t *card;

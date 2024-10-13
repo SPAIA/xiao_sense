@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
+#include "sdcard_interface.h"
 
 #define SDA_GPIO 5
 #define SCL_GPIO 6
