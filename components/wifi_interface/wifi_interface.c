@@ -24,6 +24,8 @@
 
 #include "esp_netif.h"
 
+#include "esp_sntp.h"
+
 /* The examples use WiFi configuration that you can set via project configuration menu
 
    If you'd rather not, just change the below entries to strings with
@@ -42,6 +44,42 @@ static EventGroupHandle_t s_wifi_event_group;
 static const char *TAG = "wifi station";
 
 static int s_retry_num = 0;
+
+void obtain_time(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Starting NTP sync task.");
+
+    // Initialize SNTP
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "pool.ntp.org"); // Use default NTP server, you can replace with a specific one
+    sntp_init();
+
+    // Wait for time to be set via NTP
+    time_t now = 0;
+    struct tm timeinfo = {0};
+    int retry = 0;
+    const int retry_count = 10;
+
+    while (timeinfo.tm_year < (1970 - 1900) && ++retry < retry_count)
+    {
+        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+        time(&now);
+        localtime_r(&now, &timeinfo);
+    }
+
+    if (retry < retry_count)
+    {
+        ESP_LOGI(TAG, "System time set successfully.");
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Failed to get time from NTP server.");
+    }
+
+    // Once done, delete the task
+    vTaskDelete(NULL);
+}
 
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
@@ -70,6 +108,9 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+
+        // Create a FreeRTOS task to fetch NTP time once connected
+        xTaskCreate(obtain_time, "obtain_time", 4096, NULL, 5, NULL);
     }
 }
 

@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <dirent.h>
 #include <string.h>
 #include <time.h>
 #include <sys/unistd.h>
@@ -11,6 +12,8 @@
 #include "sdcard_interface.h"
 #include "file_upload.h"
 
+#define MAX_FILE_PATH 256
+
 const char sdcardTag[7] = "sdcard";
 
 QueueHandle_t sensor_data_queue = NULL;
@@ -21,7 +24,82 @@ sdmmc_card_t *card;
 // By default, SD card frequency is initialized to SDMMC_FREQ_DEFAULT (20MHz)
 // For setting a specific frequency, use host.max_freq_khz (range 400kHz - 20MHz for SDSPI)
 sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-const char mount_point[] = "/sd";
+
+esp_err_t sdcard_read_csv_files(const char *folder_path, char file_list[][MAX_FILE_PATH], int *file_count, int max_files)
+{
+    DIR *dir;
+    struct dirent *ent;
+    char full_path[MAX_FILE_PATH];
+    int count = 0;
+
+    dir = opendir(folder_path);
+    if (dir == NULL)
+    {
+        ESP_LOGE("SDCARD", "Failed to open directory");
+        return ESP_FAIL;
+    }
+
+    while ((ent = readdir(dir)) != NULL && count < max_files)
+    {
+        if (ent->d_type == DT_REG)
+        { // If it's a regular file
+            const char *ext = strrchr(ent->d_name, '.');
+            if (ext && strcmp(ext, ".csv") == 0)
+            { // If it's a .csv file
+                snprintf(full_path, sizeof(full_path), "%s/%s", folder_path, ent->d_name);
+                strncpy(file_list[count], full_path, MAX_FILE_PATH - 1);
+                file_list[count][MAX_FILE_PATH - 1] = '\0'; // Ensure null-termination
+                count++;
+            }
+        }
+    }
+
+    closedir(dir);
+    *file_count = count;
+    return ESP_OK;
+}
+
+void saveJpegToSdcard(camera_fb_t *captureImage)
+{
+
+    // Find the next available filename
+    char filename[32];
+
+    sprintf(filename, "%s/spaia/%u_img.jpg", MOUNT_POINT, lastKnownFile++);
+
+    // Create the file and write the JPEG data
+    FILE *fp = fopen(filename, "wb");
+    if (fp != NULL)
+    {
+        fwrite(captureImage->buf, 1, captureImage->len, fp);
+        fclose(fp);
+        ESP_LOGI(sdcardTag, "JPEG saved as %s", filename);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        // queue_file_upload(filename, "https://device.spaia.earth/image");
+    }
+    else
+    {
+        ESP_LOGE(sdcardTag, "Failed to create file: %s", filename);
+    }
+}
+
+void log_sensor_data_task(void *pvParameters)
+{
+    sensor_data_t sensor_data;
+    for (;;)
+    {
+        if (xQueueReceive(sensor_data_queue, &sensor_data, portMAX_DELAY) == pdTRUE)
+        {
+            append_data_to_csv(sensor_data.temperature, sensor_data.humidity, sensor_data.pressure, sensor_data.bboxes);
+        }
+    }
+}
+void create_data_log_queue()
+{
+    ESP_LOGI(sdcardTag, "started Q");
+    sensor_data_queue = xQueueCreate(10, sizeof(sensor_data_t));
+    xTaskCreate(log_sensor_data_task, "file_upload_task", 8192, NULL, 5, NULL);
+}
 
 void initialize_sdcard()
 {
@@ -68,7 +146,7 @@ void initialize_sdcard()
     slot_config.host_id = host.slot;
 
     ESP_LOGI(sdcardTag, "Mounting filesystem");
-    ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
+    ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
 
     if (ret != ESP_OK)
     {
@@ -112,7 +190,7 @@ void initialize_sdcard()
 
     // Format FATFS
 #ifdef FORMAT_SD_CARD
-    ret = esp_vfs_fat_sdcard_format(mount_point, card);
+    ret = esp_vfs_fat_sdcard_format(MOUNT_POINT, card);
     if (ret != ESP_OK)
     {
         ESP_LOGE(sdcardTag, "Failed to format FATFS (%s)", esp_err_to_name(ret));
@@ -134,7 +212,7 @@ void initialize_sdcard()
 void deinitialise_sdcard()
 {
     // All done, unmount partition and disable SPI peripheral
-    esp_vfs_fat_sdcard_unmount(mount_point, card);
+    esp_vfs_fat_sdcard_unmount(MOUNT_POINT, card);
     ESP_LOGI(sdcardTag, "Card unmounted");
 
     // deinitialize the bus after all devices are removed
@@ -143,6 +221,7 @@ void deinitialise_sdcard()
 
 void append_data_to_csv(float temperature, float humidity, float pressure, const char *bboxes)
 {
+    ESP_LOGI(sdcardTag, "starting to save csv");
     time_t now;
     struct tm timeinfo;
     char filename[64];
@@ -156,7 +235,7 @@ void append_data_to_csv(float temperature, float humidity, float pressure, const
     strftime(filename, sizeof(filename), "%d-%m-%y.csv", &timeinfo);
 
     // Construct full filepath
-    snprintf(filepath, sizeof(filepath), "%s/%s", mount_point, filename);
+    snprintf(filepath, sizeof(filepath), "%s/spaia/%s", MOUNT_POINT, filename);
 
     FILE *file = fopen(filepath, "r"); // Try to open the file in read mode first
     bool file_exists = (file != NULL);
@@ -188,33 +267,4 @@ void append_data_to_csv(float temperature, float humidity, float pressure, const
     // Close the file
     fclose(file);
     ESP_LOGI(sdcardTag, "Data appended successfully to CSV file: %s", filepath);
-}
-
-void saveJpegToSdcard(camera_fb_t *captureImage)
-{
-
-    // Find the next available filename
-    char filename[32];
-
-    sprintf(filename, "%s/spaia/%u_img.jpg", mount_point, lastKnownFile++);
-
-    // Create the file and write the JPEG data
-    FILE *fp = fopen(filename, "wb");
-    if (fp != NULL)
-    {
-        fwrite(captureImage->buf, 1, captureImage->len, fp);
-        fclose(fp);
-        ESP_LOGI(sdcardTag, "JPEG saved as %s", filename);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        // queue_file_upload(filename, "https://device.spaia.earth/image");
-    }
-    else
-    {
-        ESP_LOGE(sdcardTag, "Failed to create file: %s", filename);
-    }
-}
-
-void create_data_log_queue()
-{
-    sensor_data_queue = xQueueCreate(10, sizeof(sensor_data_t));
 }

@@ -29,20 +29,21 @@ void bmp280_test(void *pvParameters)
         }
 
         printf("Pressure: %.2f Pa, Temperature: %.2f C", pressure, temperature);
+        sensor_data_t sensor_data;
+        sensor_data.temperature = temperature;
+        sensor_data.pressure = pressure;
         if (bme280p)
         {
 
-            sensor_data_t sensor_data;
-            sensor_data.temperature = temperature;
-            sensor_data.pressure = pressure;
-            if (xQueueSend(sensor_data_queue, &sensor_data, pdMS_TO_TICKS(10)) != pdTRUE)
-            {
-                ESP_LOGE("climate", "Failed to send data to the queue");
-            }
+            sensor_data.humidity = humidity;
             printf(", Humidity: %.2f\n", humidity);
         }
         else
             printf("\n");
+        if (xQueueSend(sensor_data_queue, &sensor_data, pdMS_TO_TICKS(10)) != pdTRUE)
+        {
+            ESP_LOGE("climate", "Failed to send data to the queue");
+        }
     }
 }
 

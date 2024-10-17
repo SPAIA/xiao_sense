@@ -9,6 +9,7 @@
 
 #define MAX_FILE_PATH 64
 #define MAX_URL_LENGTH 256
+#define QUEUE_SIZE 10
 
 #define MAX_FILE_SIZE (1024 * 1024) // 1MB max file size, adjust as needed
 
@@ -74,7 +75,7 @@ esp_err_t upload_file_to_https(const char *filepath, const char *url, const char
     int header_size = snprintf(buffer, 1024,
                                "--%s\r\n"
                                "Content-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n"
-                               "Content-Type: image/jpeg\r\n\r\n",
+                               "Content-Type: application/octet-stream\\r\n\r\n",
                                boundary, filepath);
 
     if (header_size < 0 || header_size >= 1024)
@@ -131,7 +132,7 @@ void file_upload_task(void *pvParameters)
             if (stat(request.filepath, &st) == 0)
             {
                 ESP_LOGI(TAG, "File exists, starting upload: %s", request.filepath);
-                esp_err_t result = upload_file_to_https(request.filepath, request.url, "test");
+                esp_err_t result = upload_file_to_https(request.filepath, request.url, CONFIG_SPAIA_DEVICE_ID);
                 if (result == ESP_OK)
                 {
                     ESP_LOGI(TAG, "Upload completed successfully");
@@ -151,9 +152,18 @@ void file_upload_task(void *pvParameters)
     }
 }
 
+void init_upload_queue()
+{
+    upload_queue = xQueueCreate(QUEUE_SIZE, sizeof(UploadRequest));
+    if (upload_queue == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create upload queue");
+    }
+}
+
 void init_file_upload_system()
 {
-    upload_queue = xQueueCreate(10, sizeof(UploadRequest));
+    init_upload_queue();
     xTaskCreate(file_upload_task, "file_upload_task", 8192, NULL, 5, NULL);
 }
 
