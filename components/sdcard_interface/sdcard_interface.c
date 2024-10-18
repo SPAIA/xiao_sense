@@ -140,7 +140,12 @@ void create_data_log_queue()
 {
     ESP_LOGI(sdcardTag, "started Q");
     sensor_data_queue = xQueueCreate(10, sizeof(sensor_data_t));
-    xTaskCreate(log_sensor_data_task, "file_upload_task", 8192, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(
+        log_sensor_data_task, "file_upload_task", 8192, // Increased stack size
+        NULL,
+        tskIDLE_PRIORITY + 2, // Slightly higher priority
+        NULL,
+        PRO_CPU_NUM);
 }
 
 void initialize_sdcard()

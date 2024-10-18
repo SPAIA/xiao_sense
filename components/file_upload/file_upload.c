@@ -164,7 +164,7 @@ void init_upload_queue()
 void init_file_upload_system()
 {
     init_upload_queue();
-    xTaskCreate(file_upload_task, "file_upload_task", 8192, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(file_upload_task, "file_upload_task", 8192, NULL, 5, NULL, PRO_CPU_NUM);
 }
 
 esp_err_t queue_file_upload(const char *filepath, const char *url)

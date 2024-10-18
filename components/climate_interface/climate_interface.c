@@ -50,7 +50,7 @@ void bmp280_test(void *pvParameters)
 void createClimateTask()
 {
     // Increased stack size to ensure task stability
-    xTaskCreatePinnedToCore(bmp280_test, "bmp280_test", configMINIMAL_STACK_SIZE * 8, NULL, 5, NULL, APP_CPU_NUM);
+    xTaskCreatePinnedToCore(bmp280_test, "bmp280_test", configMINIMAL_STACK_SIZE * 6, NULL, 3, NULL, PRO_CPU_NUM);
 }
 void init_climate()
 {

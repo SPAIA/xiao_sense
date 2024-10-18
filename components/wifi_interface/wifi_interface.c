@@ -110,7 +110,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
         // Create a FreeRTOS task to fetch NTP time once connected
-        xTaskCreate(obtain_time, "obtain_time", 4096, NULL, 5, NULL);
+        xTaskCreatePinnedToCore(obtain_time, "obtain_time", 4096, NULL, 7, NULL, PRO_CPU_NUM);
     }
 }
 

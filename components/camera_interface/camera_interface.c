@@ -40,27 +40,15 @@ static camera_config_t camera_config = {
     .fb_count = 2,                       // The number of frame buffers to use.
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY  //  The image capture mode.
 };
-void initialize_camera(void)
+void silence_camera_logs()
 {
-    camera_semaphore = xSemaphoreCreateMutex();
-    if (camera_semaphore == NULL)
-    {
-        ESP_LOGE(cameraTag, "Failed to create camera semaphore");
-        return;
-    }
-
-    ESP_LOGI(cameraTag, "Camera semaphore created successfully");
-    esp_err_t ret = esp_camera_init(&camera_config);
-    if (ret == ESP_OK)
-    {
-        ESP_LOGI(cameraTag, "Camera configured successfully");
-    }
-    else
-    {
-        ESP_LOGE(cameraTag, "Camera configuration failed");
-        return;
-    }
-
+    esp_log_level_set("s3 ll_cam", ESP_LOG_ERROR);
+    esp_log_level_set("cam_hal", ESP_LOG_ERROR);
+    esp_log_level_set("sccb", ESP_LOG_ERROR);
+    esp_log_level_set("camera", ESP_LOG_ERROR);
+}
+void set_camera()
+{
     // Initial camera settings for motion detection
     sensor_t *s = esp_camera_sensor_get();
     if (s == NULL)
@@ -100,10 +88,10 @@ void initialize_camera(void)
     s->set_aec2(s, 1); // Suggest default: 1 (use two-pass auto exposure)
 
     // Set auto exposure level (-2 to 2). 0 is normal exposure.
-    s->set_ae_level(s, 0); // Suggest default: 0 (neutral exposure level)
+    s->set_ae_level(s, 1); // Suggest default: 0 (neutral exposure level)
 
     // Set target exposure value (0 to 1200). Higher values for brighter images.
-    s->set_aec_value(s, 300); // Suggest default: 300 (adjust based on light conditions)
+    s->set_aec_value(s, 400); // Suggest default: 300 (adjust based on light conditions)
 
     // Enable or disable auto gain control (0 or 1). 1 enables AGC.
     s->set_gain_ctrl(s, 1); // Suggest default: 1 (auto gain control)
@@ -134,7 +122,29 @@ void initialize_camera(void)
 
     // Enable or disable downsize/crop/window (0 or 1). 1 reduces image size for lower resolutions.
     s->set_dcw(s, 1); // Suggest default: 1 (use DCW to reduce image size if needed)
+}
+void initialize_camera(void)
+{
+    silence_camera_logs();
+    camera_semaphore = xSemaphoreCreateMutex();
+    if (camera_semaphore == NULL)
+    {
+        ESP_LOGE(cameraTag, "Failed to create camera semaphore");
+        return;
+    }
 
+    // ESP_LOGI(cameraTag, "Camera semaphore created successfully");
+    esp_err_t ret = esp_camera_init(&camera_config);
+    if (ret == ESP_OK)
+    {
+        ESP_LOGI(cameraTag, "Camera configured successfully");
+    }
+    else
+    {
+        ESP_LOGE(cameraTag, "Camera configuration failed");
+        return;
+    }
+    set_camera();
     initialize_background_model(320, 240);
 }
 esp_err_t switch_camera_mode(camera_config_t *config, framesize_t new_frame_size, pixformat_t new_pixel_format)
@@ -164,20 +174,6 @@ esp_err_t switch_camera_mode(camera_config_t *config, framesize_t new_frame_size
         return err;
     }
 
-    // Add a delay after initialization
-    // vTaskDelay(pdMS_TO_TICKS(100));
-
-    // Verify the new settings
-    sensor_t *s = esp_camera_sensor_get();
-    if (s == NULL)
-    {
-        ESP_LOGE(cameraTag, "Failed to acquire sensor");
-        return ESP_FAIL;
-    }
-
-    // ESP_LOGI(cameraTag, "New camera settings - Resolution: %dx%d, Format: %d",
-    //          s->status.framesize, s->status.framesize, s->pixformat);
-
     return ESP_OK;
 }
 
@@ -185,7 +181,7 @@ void takeHighResPhoto()
 {
     if (xSemaphoreTake(camera_semaphore, portMAX_DELAY) == pdTRUE)
     {
-        ESP_LOGI(cameraTag, "Taking high-resolution picture...");
+        // ESP_LOGI(cameraTag, "Taking high-resolution picture...");
         switch_camera_mode(&camera_config, FRAMESIZE_SXGA, PIXFORMAT_JPEG);
         camera_fb_t *pic = esp_camera_fb_get();
         if (!pic)
@@ -201,9 +197,6 @@ void takeHighResPhoto()
             ESP_LOGE(cameraTag, "Failed to save image to SD card");
             goto exit;
         }
-
-        ESP_LOGI(cameraTag, "Image saved and verified successfully");
-
     exit:
 
         if (pic)
@@ -222,7 +215,7 @@ void motion_detection_task(void *pvParameters)
 {
     camera_fb_t *frame = NULL;
 
-    float motion_threshold = 0.001f;
+    float motion_threshold = 50;
 
     while (1)
     {
@@ -251,7 +244,6 @@ void motion_detection_task(void *pvParameters)
         {
             ESP_LOGE(cameraTag, "Failed to take camera semaphore in motion detection task");
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -270,8 +262,7 @@ void createCameraTask()
         NULL,
         tskIDLE_PRIORITY + 2, // Slightly higher priority
         NULL,
-        0 // Pin to Core 0
-    );
+        APP_CPU_NUM);
 
     if (xReturned != pdPASS)
     {
