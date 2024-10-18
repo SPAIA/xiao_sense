@@ -13,6 +13,7 @@
 #include "file_upload.h"
 
 #define MAX_FILE_PATH 256
+#define MAX_PATH_LEN 512
 
 const char sdcardTag[7] = "sdcard";
 
@@ -29,7 +30,7 @@ esp_err_t sdcard_read_csv_files(const char *folder_path, char file_list[][MAX_FI
 {
     DIR *dir;
     struct dirent *ent;
-    char full_path[MAX_FILE_PATH];
+    char full_path[MAX_PATH_LEN];
     int count = 0;
 
     dir = opendir(folder_path);
@@ -58,31 +59,72 @@ esp_err_t sdcard_read_csv_files(const char *folder_path, char file_list[][MAX_FI
     *file_count = count;
     return ESP_OK;
 }
-
-void saveJpegToSdcard(camera_fb_t *captureImage)
+void upload_folder()
 {
+    // Read CSV files from SD card
+    char file_list[MAX_FILES][MAX_FILE_PATH];
+    int file_count = 0;
+
+    char full_path[512]; // Adjust size as needed
+    snprintf(full_path, sizeof(full_path), "%s/spaia", MOUNT_POINT);
+    esp_err_t result = sdcard_read_csv_files(full_path, file_list, &file_count, MAX_FILES);
+
+    if (result == ESP_OK)
+    {
+        ESP_LOGI("MAIN", "Found %d CSV files", file_count);
+        // Queue files for upload
+        for (int i = 0; i < file_count; i++)
+        {
+            queue_file_upload(file_list[i], "https://device.spaia.earth/upload");
+        }
+    }
+    else
+    {
+        ESP_LOGE("MAIN", "Failed to read CSV files from SD card");
+    }
+}
+
+esp_err_t saveJpegToSdcard(camera_fb_t *captureImage)
+{
+    if (captureImage == NULL)
+    {
+        ESP_LOGE(sdcardTag, "Invalid capture image pointer");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     // Find the next available filename
     char filename[32];
-
     sprintf(filename, "%s/spaia/%u_img.jpg", MOUNT_POINT, lastKnownFile++);
 
     // Create the file and write the JPEG data
     FILE *fp = fopen(filename, "wb");
-    if (fp != NULL)
-    {
-        fwrite(captureImage->buf, 1, captureImage->len, fp);
-        fclose(fp);
-        ESP_LOGI(sdcardTag, "JPEG saved as %s", filename);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        // queue_file_upload(filename, "https://device.spaia.earth/image");
-    }
-    else
+    if (fp == NULL)
     {
         ESP_LOGE(sdcardTag, "Failed to create file: %s", filename);
+        return ESP_FAIL;
     }
-}
 
+    size_t bytes_written = fwrite(captureImage->buf, 1, captureImage->len, fp);
+    fclose(fp);
+
+    if (bytes_written != captureImage->len)
+    {
+        ESP_LOGE(sdcardTag, "Failed to write all data to file: %s", filename);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(sdcardTag, "JPEG saved as %s", filename);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    esp_err_t upload_result = queue_file_upload(filename, "https://device.spaia.earth/upload");
+    if (upload_result != ESP_OK)
+    {
+        ESP_LOGE(sdcardTag, "Failed to queue file upload for %s", filename);
+        return upload_result;
+    }
+
+    return ESP_OK;
+}
 void log_sensor_data_task(void *pvParameters)
 {
     sensor_data_t sensor_data;

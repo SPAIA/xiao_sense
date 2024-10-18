@@ -24,9 +24,10 @@ extern QueueHandle_t sensor_data_queue;
 // Function prototypes
 void initialize_sdcard(void);
 void deinitialise_sdcard(void);
-void saveJpegToSdcard(camera_fb_t *fb);
+esp_err_t saveJpegToSdcard(camera_fb_t *fb);
 void create_data_log_queue(void);
 void append_data_to_csv(float temperature, float humidity, float pressure, const char *bboxes);
 void log_sensor_data_task(void *pvParameters);
+void upload_folder();
 
 #endif // SDCARD_INTERFACE_H
