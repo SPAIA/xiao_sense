@@ -9,7 +9,7 @@
 static const char *detectorTag = "detector";
 
 #define ALPHA 0.06f         // lower numbers respond to quicker movements, higher numbers reduce noise sensitivity
-#define FRAME_INIT_COUNT 10 // Number of frames to capture before starting motion detection
+#define FRAME_INIT_COUNT 20 // Number of frames to capture before starting motion detection
 
 typedef struct
 {
@@ -232,65 +232,77 @@ void filter_edge_touching_boxes(BoundingBox *boxes, size_t *box_count, size_t fr
         }
     }
 }
-char *boxes_to_csv(BoundingBox *boxes, size_t box_count)
+char *boxes_to_json(BoundingBox *boxes, size_t box_count)
 {
     if (box_count == 0 || boxes == NULL)
     {
-        return strdup(""); // Return an empty string if there are no boxes
+        return strdup("[]"); // Return an empty JSON array if there are no boxes
     }
 
-    // Estimate the size of the string we'll need
-    // Format: "index,x_min,y_min,x_max,y_max\n" for each box
-    size_t estimated_size = box_count * 50; // 50 characters should be enough per line
+    // Estimate the size of the JSON string
+    size_t estimated_size = box_count * 100; // Allow for space for bounding box data and commas
 
-    char *csv_string = (char *)malloc(estimated_size);
-    if (csv_string == NULL)
+    char *json_string = (char *)malloc(estimated_size);
+    if (json_string == NULL)
     {
-        ESP_LOGE("boxes_to_csv", "Failed to allocate memory for CSV string");
+        ESP_LOGE("boxes_to_json", "Failed to allocate memory for JSON string");
         return NULL;
     }
 
-    char *current_position = csv_string;
+    char *current_position = json_string;
     size_t remaining_size = estimated_size;
 
-    // Add a header row
-    int written = snprintf(current_position, remaining_size, "index,x_min,y_min,x_max,y_max\n");
+    // Start the JSON array
+    int written = snprintf(current_position, remaining_size, "[");
     current_position += written;
     remaining_size -= written;
 
     for (size_t i = 0; i < box_count; i++)
     {
+        // Format each bounding box as a JSON object
         written = snprintf(current_position, remaining_size,
-                           "%zu,%zu,%zu,%zu,%zu\n",
-                           i, boxes[i].x_min, boxes[i].y_min, boxes[i].x_max, boxes[i].y_max);
+                           "{\"x_min\":%zu,\"y_min\":%zu,\"x_max\":%zu,\"y_max\":%zu}",
+                           boxes[i].x_min, boxes[i].y_min, boxes[i].x_max, boxes[i].y_max);
 
         if (written >= remaining_size)
         {
             // We're out of space, need to reallocate
-            size_t current_length = current_position - csv_string;
+            size_t current_length = current_position - json_string;
             estimated_size *= 2; // Double the size
-            char *new_string = (char *)realloc(csv_string, estimated_size);
+            char *new_string = (char *)realloc(json_string, estimated_size);
             if (new_string == NULL)
             {
-                ESP_LOGE("boxes_to_csv", "Failed to reallocate memory for CSV string");
-                free(csv_string);
+                ESP_LOGE("boxes_to_json", "Failed to reallocate memory for JSON string");
+                free(json_string);
                 return NULL;
             }
-            csv_string = new_string;
-            current_position = csv_string + current_length;
+            json_string = new_string;
+            current_position = json_string + current_length;
             remaining_size = estimated_size - current_length;
 
             // Try writing again
             written = snprintf(current_position, remaining_size,
-                               "%zu,%zu,%zu,%zu,%zu\n",
-                               i, boxes[i].x_min, boxes[i].y_min, boxes[i].x_max, boxes[i].y_max);
+                               "{\"x_min\":%zu,\"y_min\":%zu,\"x_max\":%zu,\"y_max\":%zu}",
+                               boxes[i].x_min, boxes[i].y_min, boxes[i].x_max, boxes[i].y_max);
         }
 
         current_position += written;
         remaining_size -= written;
+
+        // Add a comma if it's not the last box
+        if (i < box_count - 1)
+        {
+            written = snprintf(current_position, remaining_size, ",");
+            current_position += written;
+            remaining_size -= written;
+        }
     }
 
-    return csv_string;
+    // Close the JSON array
+    written = snprintf(current_position, remaining_size, "]");
+    current_position += written;
+
+    return json_string;
 }
 
 bool detect_motion(camera_fb_t *current_frame, float threshold)
@@ -300,7 +312,7 @@ bool detect_motion(camera_fb_t *current_frame, float threshold)
     size_t box_count = 0;
     size_t max_area = 10000; // the max size of a valid box
     size_t min_area = 200;
-    float iou_threshold = 0.1;
+    float iou_threshold = 0.3;
     BoundingBox *boxes = (BoundingBox *)malloc(max_boxes * sizeof(BoundingBox));
 
     if (!current_frame || !bg_model.background || bg_model.width != current_frame->width || bg_model.height != current_frame->height)
@@ -395,17 +407,17 @@ bool detect_motion(camera_fb_t *current_frame, float threshold)
         if (box_count > 0)
         {
             ESP_LOGI(detectorTag, "Remaining boxes after filtering and merging: %zu", box_count);
-            char *csv_string = boxes_to_csv(boxes, box_count);
-            if (csv_string != NULL)
+            char *json_string = boxes_to_json(boxes, box_count);
+            if (json_string != NULL)
             {
-                // Use your function to save the CSV string
-                // save_csv_to_file(csv_string); // You'll need to implement this function
+                // Use your function to save the json string
+                // save_json_to_file(json_string); // You'll need to implement this function
 
-                // Log the CSV string (for debugging, you might want to remove this in production)
-                ESP_LOGI(detectorTag, "Bounding Boxes CSV:\n%s", csv_string);
+                // Log the json string (for debugging, you might want to remove this in production)
+                ESP_LOGI(detectorTag, "Bounding Boxes json:\n%s", json_string);
 
                 // Don't forget to free the allocated string
-                free(csv_string);
+                free(json_string);
             }
             return true;
         }

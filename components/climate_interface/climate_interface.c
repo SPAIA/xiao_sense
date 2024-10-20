@@ -1,15 +1,16 @@
 #include "bmp280.h"
 #include "climate_interface.h"
+#include <esp_err.h>
+
+#define READING_INTERVAL_MS (30 * 60 * 1000) // 30 minutes in milliseconds
 
 void bmp280_test(void *pvParameters)
 {
-
     bmp280_params_t params;
     bmp280_init_default_params(&params);
     bmp280_t dev;
     memset(&dev, 0, sizeof(bmp280_t));
 
-    // Ensure SDA_GPIO and SCL_GPIO are defined correctly
     ESP_ERROR_CHECK(bmp280_init_desc(&dev, BMP280_I2C_ADDRESS_1, 0, SDA_GPIO, SCL_GPIO));
     ESP_ERROR_CHECK(bmp280_init(&dev, &params));
 
@@ -20,38 +21,51 @@ void bmp280_test(void *pvParameters)
 
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(10000));
-        // Check for errors from bmp280_read_float
+        // Wake up the sensor
+        params.mode = BMP280_MODE_SLEEP;
+        ESP_ERROR_CHECK(bmp280_init(&dev, &params));
+
+        // Wait a bit for the sensor to wake up and stabilize
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // Take a reading
         if (bmp280_read_float(&dev, &temperature, &pressure, bme280p ? &humidity : NULL) != ESP_OK)
         {
             printf("Temperature/pressure reading failed\n");
-            continue;
-        }
-
-        printf("Pressure: %.2f Pa, Temperature: %.2f C", pressure, temperature);
-        sensor_data_t sensor_data;
-        sensor_data.temperature = temperature;
-        sensor_data.pressure = pressure;
-        if (bme280p)
-        {
-
-            sensor_data.humidity = humidity;
-            printf(", Humidity: %.2f\n", humidity);
         }
         else
-            printf("\n");
-        if (xQueueSend(sensor_data_queue, &sensor_data, pdMS_TO_TICKS(10)) != pdTRUE)
         {
-            ESP_LOGE("climate", "Failed to send data to the queue");
+            printf("Pressure: %.2f Pa, Temperature: %.2f C", pressure, temperature);
+            sensor_data_t sensor_data;
+            sensor_data.temperature = temperature;
+            sensor_data.pressure = pressure;
+            if (bme280p)
+            {
+                sensor_data.humidity = humidity;
+                printf(", Humidity: %.2f\n", humidity);
+            }
+            else
+                printf("\n");
+            if (xQueueSend(sensor_data_queue, &sensor_data, pdMS_TO_TICKS(10)) != pdTRUE)
+            {
+                ESP_LOGE("climate", "Failed to send data to the queue");
+            }
         }
+
+        // Put the sensor to sleep
+        params.mode = BMP280_MODE_SLEEP;
+        ESP_ERROR_CHECK(bmp280_init(&dev, &params));
+
+        // Wait for the next reading interval
+        vTaskDelay(pdMS_TO_TICKS(READING_INTERVAL_MS));
     }
 }
 
 void createClimateTask()
 {
-    // Increased stack size to ensure task stability
     xTaskCreatePinnedToCore(bmp280_test, "bmp280_test", configMINIMAL_STACK_SIZE * 6, NULL, 3, NULL, PRO_CPU_NUM);
 }
+
 void init_climate()
 {
     ESP_ERROR_CHECK(i2cdev_init());

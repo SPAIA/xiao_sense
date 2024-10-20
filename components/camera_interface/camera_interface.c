@@ -58,16 +58,16 @@ void set_camera()
     }
 
     // Set brightness level (-2 to 2). 0 is the default. Adjust based on lighting.
-    s->set_brightness(s, 1); // Suggest default: 0 (adjust based on environment)
+    s->set_brightness(s, 2); // Suggest default: 0 (adjust based on environment)
 
     // Set contrast level (-2 to 2). 0 is normal, higher values increase contrast.
-    s->set_contrast(s, 1); // Suggest default: 0 (1 for enhanced contrast)
+    s->set_contrast(s, 0); // Suggest default: 0 (1 for enhanced contrast)
 
     // Set saturation level (-2 to 2). 0 is neutral, higher values increase saturation.
     s->set_saturation(s, 1); // Suggest default: 0 (1 for more vibrant colors)
 
     // Set sharpness level (0 to 3). Higher values increase sharpness but may add noise.
-    s->set_sharpness(s, 2); // Suggest default: 1 (2 for more detail)
+    s->set_sharpness(s, 0); // Suggest default: 1 (2 for more detail)
 
     // Set denoise level (0 or 1). 1 enables noise reduction, useful in low light.
     s->set_denoise(s, 1); // Suggest default: 1 (keep noise reduction on)
@@ -88,10 +88,10 @@ void set_camera()
     s->set_aec2(s, 1); // Suggest default: 1 (use two-pass auto exposure)
 
     // Set auto exposure level (-2 to 2). 0 is normal exposure.
-    s->set_ae_level(s, 1); // Suggest default: 0 (neutral exposure level)
+    s->set_ae_level(s, 2); // Suggest default: 0 (neutral exposure level)
 
     // Set target exposure value (0 to 1200). Higher values for brighter images.
-    s->set_aec_value(s, 400); // Suggest default: 300 (adjust based on light conditions)
+    s->set_aec_value(s, 800); // Suggest default: 300 (adjust based on light conditions)
 
     // Enable or disable auto gain control (0 or 1). 1 enables AGC.
     s->set_gain_ctrl(s, 1); // Suggest default: 1 (auto gain control)
@@ -118,7 +118,7 @@ void set_camera()
     s->set_hmirror(s, 0); // Suggest default: 0 (no horizontal flip)
 
     // Enable or disable vertical flip (0 or 1). 0 is normal, 1 flips image vertically.
-    s->set_vflip(s, 1); // Suggest default: 0 (no vertical flip, unless needed)
+    s->set_vflip(s, 0); // Suggest default: 0 (no vertical flip, unless needed)
 
     // Enable or disable downsize/crop/window (0 or 1). 1 reduces image size for lower resolutions.
     s->set_dcw(s, 1); // Suggest default: 1 (use DCW to reduce image size if needed)
@@ -173,7 +173,7 @@ esp_err_t switch_camera_mode(camera_config_t *config, framesize_t new_frame_size
         ESP_LOGE(cameraTag, "Camera init failed: %s", esp_err_to_name(err));
         return err;
     }
-
+    set_camera();
     return ESP_OK;
 }
 
@@ -183,6 +183,7 @@ void takeHighResPhoto()
     {
         // ESP_LOGI(cameraTag, "Taking high-resolution picture...");
         switch_camera_mode(&camera_config, FRAMESIZE_SXGA, PIXFORMAT_JPEG);
+        vTaskDelay(pdMS_TO_TICKS(100));
         camera_fb_t *pic = esp_camera_fb_get();
         if (!pic)
         {

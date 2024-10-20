@@ -16,14 +16,14 @@ void initialize_drivers()
 
 void start_tasks()
 {
+    // upload_folder();
     createCameraTask();
-    create_data_log_queue();
-    init_climate();
+    // create_data_log_queue();
+    // init_climate();
 }
 
 void app_main(void)
 {
     initialize_drivers();
-    vTaskDelay(pdMS_TO_TICKS(500));
     start_tasks();
 }
