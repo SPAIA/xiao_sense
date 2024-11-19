@@ -10,9 +10,7 @@
 #define SCL_GPIO 6
 #define I2C_PORT 0
 
-static const char *TAG = "bmp280_example";
-
-void createClimatTask();
 void init_climate();
-void bmp280_test(void *pvParameters);
+bool is_climate_sensor_available(void);
+
 #endif // CAMERA_INTERFACE_H

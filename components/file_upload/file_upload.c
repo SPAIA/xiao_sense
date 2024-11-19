@@ -43,6 +43,7 @@ esp_err_t upload_file_to_https(const char *filepath, const char *url, const char
         fclose(file);
         return ESP_FAIL;
     }
+
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_POST,
@@ -57,13 +58,18 @@ esp_err_t upload_file_to_https(const char *filepath, const char *url, const char
         return ESP_FAIL;
     }
 
+    // Extract just the filename from the filepath
+    const char *filename = strrchr(filepath, '/');
+    filename = (filename != NULL) ? filename + 1 : filepath;
+
     // Set headers
     esp_http_client_set_header(client, "Content-Type", "multipart/form-data; boundary=------------------------boundary");
     esp_http_client_set_header(client, "Authorization", api_key);
 
     // Prepare multipart form data
     const char *boundary = "------------------------boundary";
-    char *buffer = malloc(MAX_FILE_SIZE + 1024); // Extra space for headers
+    size_t buffer_size = file_size + 1024; // Extra space for headers and boundary
+    char *buffer = malloc(buffer_size);
     if (buffer == NULL)
     {
         ESP_LOGE(TAG, "Failed to allocate memory");
@@ -72,13 +78,13 @@ esp_err_t upload_file_to_https(const char *filepath, const char *url, const char
         return ESP_FAIL;
     }
 
-    int header_size = snprintf(buffer, 1024,
+    int header_size = snprintf(buffer, buffer_size,
                                "--%s\r\n"
                                "Content-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n"
-                               "Content-Type: application/octet-stream\\r\n\r\n",
-                               boundary, filepath);
+                               "Content-Type: application/octet-stream\r\n\r\n",
+                               boundary, filename);
 
-    if (header_size < 0 || header_size >= 1024)
+    if (header_size < 0 || header_size >= buffer_size)
     {
         ESP_LOGE(TAG, "Multipart header size is too large");
         free(buffer);
@@ -98,8 +104,9 @@ esp_err_t upload_file_to_https(const char *filepath, const char *url, const char
     }
 
     int content_length = header_size + file_size;
-    content_length += snprintf(buffer + content_length, 1024, "\r\n--%s--\r\n", boundary);
+    content_length += snprintf(buffer + content_length, buffer_size - content_length, "\r\n--%s--\r\n", boundary);
 
+    // Set the content length and post field
     esp_http_client_set_post_field(client, buffer, content_length);
 
     // Perform the HTTP POST request
@@ -108,6 +115,19 @@ esp_err_t upload_file_to_https(const char *filepath, const char *url, const char
     {
         int status_code = esp_http_client_get_status_code(client);
         ESP_LOGI(TAG, "HTTP POST Status = %d", status_code);
+
+        // If upload was successful, delete the file
+        if (status_code >= 200 && status_code < 300) // Check for 2xx successful status
+        {
+            if (remove(filepath) == 0)
+            {
+                ESP_LOGI(TAG, "File successfully uploaded and deleted: %s", filepath);
+            }
+            else
+            {
+                ESP_LOGE(TAG, "Failed to delete file: %s", filepath);
+            }
+        }
     }
     else
     {

@@ -8,7 +8,6 @@
 void initialize_drivers()
 {
     initialize_wifi();
-    vTaskDelay(pdMS_TO_TICKS(500));
     initialize_sdcard();
     initialize_camera();
     init_file_upload_system();
@@ -16,9 +15,10 @@ void initialize_drivers()
 
 void start_tasks()
 {
-    // upload_folder();
+    upload_folder();
+    create_data_log_queue();
     createCameraTask();
-    // create_data_log_queue();
+
     // init_climate();
 }
 

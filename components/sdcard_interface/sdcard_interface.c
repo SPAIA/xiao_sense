@@ -61,30 +61,47 @@ esp_err_t sdcard_read_csv_files(const char *folder_path, char file_list[][MAX_FI
 }
 void upload_folder()
 {
-    // Read CSV files from SD card
-    char file_list[MAX_FILES][MAX_FILE_PATH];
-    int file_count = 0;
+    // Dynamically allocate memory for file list to reduce stack usage
+    char(*file_list)[MAX_FILE_PATH] = malloc(MAX_FILES * MAX_FILE_PATH);
+    if (file_list == NULL)
+    {
+        ESP_LOGE("MAIN", "Failed to allocate memory for file list");
+        return;
+    }
 
-    char full_path[512]; // Adjust size as needed
+    int file_count = 0;
+    char full_path[512];
     snprintf(full_path, sizeof(full_path), "%s/spaia", MOUNT_POINT);
     esp_err_t result = sdcard_read_csv_files(full_path, file_list, &file_count, MAX_FILES);
 
     if (result == ESP_OK)
     {
         ESP_LOGI("MAIN", "Found %d CSV files", file_count);
-        // Queue files for upload
+        // Queue a single file for upload
         for (int i = 0; i < file_count; i++)
         {
+            ESP_LOGI("MAIN", "Queueing file %s for upload", file_list[i]);
+
+            // Monitor stack usage before queuing
+            UBaseType_t stack_high_watermark = uxTaskGetStackHighWaterMark(NULL);
+            ESP_LOGI("MAIN", "Stack high watermark before queue: %d", stack_high_watermark);
+
             queue_file_upload(file_list[i], "https://device.spaia.earth/upload");
+
+            // Monitor stack usage after queuing
+            stack_high_watermark = uxTaskGetStackHighWaterMark(NULL);
+            ESP_LOGI("MAIN", "Stack high watermark after queue: %d", stack_high_watermark);
         }
     }
     else
     {
         ESP_LOGE("MAIN", "Failed to read CSV files from SD card");
     }
+
+    free(file_list); // Free allocated memory
 }
 
-esp_err_t saveJpegToSdcard(camera_fb_t *captureImage)
+esp_err_t saveJpegToSdcard(camera_fb_t *captureImage, time_t timestamp)
 {
     if (captureImage == NULL)
     {
@@ -94,7 +111,7 @@ esp_err_t saveJpegToSdcard(camera_fb_t *captureImage)
 
     // Find the next available filename
     char filename[32];
-    sprintf(filename, "%s/spaia/%u_img.jpg", MOUNT_POINT, lastKnownFile++);
+    snprintf(filename, sizeof(filename), "%s/spaia/%lld.jpg", MOUNT_POINT, (long long)timestamp);
 
     // Create the file and write the JPEG data
     FILE *fp = fopen(filename, "wb");
@@ -132,7 +149,13 @@ void log_sensor_data_task(void *pvParameters)
     {
         if (xQueueReceive(sensor_data_queue, &sensor_data, portMAX_DELAY) == pdTRUE)
         {
-            append_data_to_csv(sensor_data.temperature, sensor_data.humidity, sensor_data.pressure, sensor_data.bboxes);
+            append_data_to_csv(sensor_data.timestamp, sensor_data.temperature, sensor_data.humidity, sensor_data.pressure, sensor_data.bboxes);
+            // Free the dynamically allocated bboxes after use
+            if (sensor_data.bboxes != NULL)
+            {
+                free(sensor_data.bboxes);
+                sensor_data.bboxes = NULL;
+            }
         }
     }
 }
@@ -160,7 +183,7 @@ void initialize_sdcard()
 #else
         .format_if_mount_failed = false,
 #endif // EXAMPLE_FORMAT_IF_MOUNT_FAILED
-        .max_files = 5,
+        .max_files = 15,
         .allocation_unit_size = 32 * 1024};
 
     ESP_LOGI(sdcardTag, "Initializing SD card");
@@ -266,33 +289,34 @@ void deinitialise_sdcard()
     spi_bus_free(host.slot);
 }
 
-void append_data_to_csv(float temperature, float humidity, float pressure, const char *bboxes)
+void append_data_to_csv(time_t timestamp, float temperature, float humidity, float pressure, const char *bboxes)
 {
-    ESP_LOGI(sdcardTag, "starting to save csv");
-    time_t now;
+    ESP_LOGI(sdcardTag, "Starting to save CSV");
+
     struct tm timeinfo;
     char filename[64];
     char filepath[128];
 
-    // Get current time
-    time(&now);
-    localtime_r(&now, &timeinfo);
+    // Get the local time from the passed timestamp
+    localtime_r(&timestamp, &timeinfo);
 
-    // Generate filename based on current date
+    // Generate filename based on the current date
     strftime(filename, sizeof(filename), "%d-%m-%y.csv", &timeinfo);
 
     // Construct full filepath
     snprintf(filepath, sizeof(filepath), "%s/spaia/%s", MOUNT_POINT, filename);
 
-    FILE *file = fopen(filepath, "r"); // Try to open the file in read mode first
+    // Check if the file exists by attempting to open it in read mode
+    FILE *file = fopen(filepath, "r");
     bool file_exists = (file != NULL);
 
-    if (file != NULL)
+    if (file_exists)
     {
         fclose(file);
     }
 
-    file = fopen(filepath, "a"); // Open the file in append mode
+    // Open the file in append mode
+    file = fopen(filepath, "a");
 
     if (file == NULL)
     {
@@ -309,7 +333,7 @@ void append_data_to_csv(float temperature, float humidity, float pressure, const
 
     // Write the data to the CSV file
     fprintf(file, "%lld,%f,%f,%f,%s\n",
-            (long long)now, temperature, humidity, pressure, bboxes ? bboxes : "");
+            (long long)timestamp, temperature, humidity, pressure, bboxes ? bboxes : "");
 
     // Close the file
     fclose(file);

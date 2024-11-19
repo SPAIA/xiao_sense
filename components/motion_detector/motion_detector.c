@@ -5,6 +5,7 @@
 #include <math.h>
 #include "esp_log.h"
 #include "esp_system.h"
+#include "sdcard_interface.h"
 
 static const char *detectorTag = "detector";
 
@@ -239,9 +240,7 @@ char *boxes_to_json(BoundingBox *boxes, size_t box_count)
         return strdup("[]"); // Return an empty JSON array if there are no boxes
     }
 
-    // Estimate the size of the JSON string
-    size_t estimated_size = box_count * 100; // Allow for space for bounding box data and commas
-
+    size_t estimated_size = box_count * 120; // Start with a larger estimate
     char *json_string = (char *)malloc(estimated_size);
     if (json_string == NULL)
     {
@@ -266,9 +265,9 @@ char *boxes_to_json(BoundingBox *boxes, size_t box_count)
 
         if (written >= remaining_size)
         {
-            // We're out of space, need to reallocate
+            // We’re out of space; double size with reallocation
             size_t current_length = current_position - json_string;
-            estimated_size *= 2; // Double the size
+            estimated_size *= 2;
             char *new_string = (char *)realloc(json_string, estimated_size);
             if (new_string == NULL)
             {
@@ -280,7 +279,7 @@ char *boxes_to_json(BoundingBox *boxes, size_t box_count)
             current_position = json_string + current_length;
             remaining_size = estimated_size - current_length;
 
-            // Try writing again
+            // Retry writing
             written = snprintf(current_position, remaining_size,
                                "{\"x_min\":%zu,\"y_min\":%zu,\"x_max\":%zu,\"y_max\":%zu}",
                                boxes[i].x_min, boxes[i].y_min, boxes[i].x_max, boxes[i].y_max);
@@ -289,7 +288,7 @@ char *boxes_to_json(BoundingBox *boxes, size_t box_count)
         current_position += written;
         remaining_size -= written;
 
-        // Add a comma if it's not the last box
+        // Add a comma if it’s not the last box
         if (i < box_count - 1)
         {
             written = snprintf(current_position, remaining_size, ",");
@@ -299,13 +298,15 @@ char *boxes_to_json(BoundingBox *boxes, size_t box_count)
     }
 
     // Close the JSON array
-    written = snprintf(current_position, remaining_size, "]");
-    current_position += written;
+    snprintf(current_position, remaining_size, "]");
 
-    return json_string;
+    // Optional: Trim memory to actual size
+    size_t final_size = current_position - json_string + 1; // +1 for null terminator
+    char *final_json = (char *)realloc(json_string, final_size);
+    return final_json ? final_json : json_string; // Return final allocation or original
 }
 
-bool detect_motion(camera_fb_t *current_frame, float threshold)
+bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detection_timestamp)
 {
     // Declare local variables
     size_t max_boxes = 30;
@@ -396,16 +397,21 @@ bool detect_motion(camera_fb_t *current_frame, float threshold)
     if (box_count > 0)
     {
         // ESP_LOGI(detectorTag, "unfiltered boxes.: %zu", box_count);
-        filter_small_boxes(boxes, &box_count, min_area);
-        // ESP_LOGI(detectorTag, "small filtered out.: %zu", box_count);
-        filter_edge_touching_boxes(boxes, &box_count, width, height);
+
         // ESP_LOGI(detectorTag, "edge touching filtered out.: %zu", box_count);
         // Filter and merge boxes based on IoU threshold and max_area
         filter_and_merge_boxes(boxes, &box_count, iou_threshold, max_area);
+        filter_small_boxes(boxes, &box_count, min_area);
+        // ESP_LOGI(detectorTag, "small filtered out.: %zu", box_count);
+        filter_edge_touching_boxes(boxes, &box_count, width, height);
 
         // Check if there are still any boxes after filtering and merging
         if (box_count > 0)
         {
+            if (detection_timestamp != NULL)
+            {
+                *detection_timestamp = time(NULL); // Set the timestamp to current time
+            }
             ESP_LOGI(detectorTag, "Remaining boxes after filtering and merging: %zu", box_count);
             char *json_string = boxes_to_json(boxes, box_count);
             if (json_string != NULL)
@@ -415,6 +421,12 @@ bool detect_motion(camera_fb_t *current_frame, float threshold)
 
                 // Log the json string (for debugging, you might want to remove this in production)
                 ESP_LOGI(detectorTag, "Bounding Boxes json:\n%s", json_string);
+                sensor_data_t sensor_data;
+                sensor_data.bboxes = json_string;
+                if (xQueueSend(sensor_data_queue, &sensor_data, pdMS_TO_TICKS(10)) != pdTRUE)
+                {
+                    ESP_LOGE("climate", "Failed to send data to the queue");
+                }
 
                 // Don't forget to free the allocated string
                 free(json_string);

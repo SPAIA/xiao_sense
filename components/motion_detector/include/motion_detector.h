@@ -41,7 +41,7 @@ void update_background_model(camera_fb_t *frame);
  * @param threshold The threshold for considering a change as motion (0.0 to 1.0)
  * @return true if motion is detected, false otherwise
  */
-bool detect_motion(camera_fb_t *current_frame, float threshold);
+bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detection_timestamp);
 
 /**
  * @brief Clean up and free the memory used by the background model
