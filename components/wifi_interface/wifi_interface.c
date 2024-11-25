@@ -1,11 +1,3 @@
-/* WiFi station Example
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -26,13 +18,8 @@
 
 #include "esp_sntp.h"
 
-/* The examples use WiFi configuration that you can set via project configuration menu
-
-   If you'd rather not, just change the below entries to strings with
-   the config you want - ie #define EXAMPLE_WIFI_SSID "mywifissid"
-*/
-
-/* FreeRTOS event group to signal when we are connected*/
+static volatile bool wifi_connected = false;
+static wifi_status_callback_t status_callback = NULL;
 static EventGroupHandle_t s_wifi_event_group;
 
 /* The event group allows multiple bits for each event, but we only care about two events:
@@ -81,15 +68,30 @@ void obtain_time(void *pvParameters)
     vTaskDelete(NULL);
 }
 
+static void update_wifi_status(bool new_status)
+{
+    if (wifi_connected != new_status)
+    {
+        wifi_connected = new_status;
+        if (status_callback != NULL)
+        {
+            status_callback(new_status);
+        }
+    }
+}
+
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
 {
+    static int s_retry_num = 0;
+
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
     {
         esp_wifi_connect();
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
+        update_wifi_status(false);
         if (s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY)
         {
             esp_wifi_connect();
@@ -107,11 +109,25 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
+        update_wifi_status(true);
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-
-        // Create a FreeRTOS task to fetch NTP time once connected
+        // TODO: move this somehere more logical
+        //  Create a FreeRTOS task to fetch NTP time once connected
         xTaskCreatePinnedToCore(obtain_time, "obtain_time", 4096, NULL, 7, NULL, PRO_CPU_NUM);
     }
+}
+bool is_wifi_connected(void)
+{
+    return wifi_connected;
+}
+esp_err_t register_wifi_status_callback(wifi_status_callback_t callback)
+{
+    if (callback == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    status_callback = callback;
+    return ESP_OK;
 }
 
 void wifi_init_sta(void)

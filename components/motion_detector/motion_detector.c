@@ -410,26 +410,30 @@ bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detectio
         {
             if (detection_timestamp != NULL)
             {
-                *detection_timestamp = time(NULL); // Set the timestamp to current time
+                *detection_timestamp = time(NULL);
             }
             ESP_LOGI(detectorTag, "Remaining boxes after filtering and merging: %zu", box_count);
             char *json_string = boxes_to_json(boxes, box_count);
             if (json_string != NULL)
             {
-                // Use your function to save the json string
-                // save_json_to_file(json_string); // You'll need to implement this function
-
-                // Log the json string (for debugging, you might want to remove this in production)
-                ESP_LOGI(detectorTag, "Bounding Boxes json:\n%s", json_string);
-                sensor_data_t sensor_data;
-                sensor_data.bboxes = json_string;
+                // Create a complete sensor_data structure
+                sensor_data_t sensor_data = {
+                    .timestamp = time(NULL),
+                    .temperature = 0, // These will be set elsewhere
+                    .humidity = 0,
+                    .pressure = 0,
+                    .bboxes = json_string,
+                    .owns_bboxes = true // This instance owns the memory
+                };
+                ESP_LOGI("detector", "JSON string length: %zu", strlen(json_string));
+                ESP_LOGI("detector", "JSON string: %s", json_string);
                 if (xQueueSend(sensor_data_queue, &sensor_data, pdMS_TO_TICKS(10)) != pdTRUE)
                 {
-                    ESP_LOGE("climate", "Failed to send data to the queue");
+                    ESP_LOGE("detector", "Failed to send data to the queue");
+                    // Clean up if send fails
+                    free(json_string);
                 }
-
-                // Don't forget to free the allocated string
-                free(json_string);
+                // Don't free json_string here - it's now owned by the queue
             }
             return true;
         }

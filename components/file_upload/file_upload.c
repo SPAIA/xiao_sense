@@ -149,7 +149,7 @@ void file_upload_task(void *pvParameters)
     {
         if (xQueueReceive(upload_queue, &request, portMAX_DELAY) == pdTRUE)
         {
-            if (stat(request.filepath, &st) == 0)
+            if (stat(request.filepath, &st) == 0 && is_wifi_connected())
             {
                 ESP_LOGI(TAG, "File exists, starting upload: %s", request.filepath);
                 esp_err_t result = upload_file_to_https(request.filepath, request.url, CONFIG_SPAIA_DEVICE_ID);

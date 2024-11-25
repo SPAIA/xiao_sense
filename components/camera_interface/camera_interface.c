@@ -91,38 +91,42 @@ static void configure_sensor_settings(sensor_t *s)
     if (!s)
         return;
 
-    // Basic settings that work well for both sensors
-    s->set_brightness(s, 1);
-    s->set_contrast(s, 0);
-    s->set_saturation(s, 1);
+    // Basic settings
+    s->set_brightness(s, 2); // Increased from 1 to 2
+    s->set_contrast(s, 1);   // Increased from 0 to 1
+    s->set_saturation(s, 2); // Increased from 1 to 2
     s->set_sharpness(s, 1);
     s->set_denoise(s, 1);
     s->set_whitebal(s, 1);
     s->set_awb_gain(s, 1);
     s->set_wb_mode(s, 0);
     s->set_exposure_ctrl(s, 1);
-    s->set_aec2(s, 0);
-    s->set_ae_level(s, 0);
+    s->set_aec2(s, 1);     // Enable advanced exposure control
+    s->set_ae_level(s, 1); // Increased from 0 to 1
     s->set_gain_ctrl(s, 1);
 
     // Sensor-specific optimizations
     if (s->id.PID == OV2640_PID)
     {
-        s->set_gainceiling(s, GAINCEILING_2X);
-        s->set_aec_value(s, 200); // Lower exposure for OV2640
+        s->set_gainceiling(s, GAINCEILING_4X); // Increased from 2X to 4X
+        s->set_aec_value(s, 500);              // Increased from 200 to 500 for brighter images
+
+        // Additional OV2640-specific settings for low light
+        s->set_agc_gain(s, 0); // Auto gain control
+        s->set_bpc(s, 0);      // Disable black pixel correction to preserve light
+        s->set_wpc(s, 0);      // Disable white pixel correction
+        s->set_raw_gma(s, 1);  // Enable gamma correction
+        s->set_lenc(s, 1);     // Enable lens correction
+        s->set_hmirror(s, 0);  // Disable horizontal mirror
+        s->set_vflip(s, 0);    // Disable vertical flip
+        s->set_dcw(s, 1);      // Enable downsize crop
     }
     else if (s->id.PID == OV5640_PID)
     {
+        // Keep existing OV5640 settings
         s->set_gainceiling(s, GAINCEILING_2X);
-        s->set_aec_value(s, 400); // Higher exposure for OV5640
+        s->set_aec_value(s, 400);
     }
-
-    // Common settings for both sensors
-    s->set_bpc(s, 1);
-    s->set_wpc(s, 1);
-    s->set_raw_gma(s, 1);
-    s->set_lenc(s, 1);
-    s->set_dcw(s, 1);
 }
 
 esp_err_t initialize_camera(void)

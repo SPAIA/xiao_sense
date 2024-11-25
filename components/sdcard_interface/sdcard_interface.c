@@ -149,9 +149,14 @@ void log_sensor_data_task(void *pvParameters)
     {
         if (xQueueReceive(sensor_data_queue, &sensor_data, portMAX_DELAY) == pdTRUE)
         {
-            append_data_to_csv(sensor_data.timestamp, sensor_data.temperature, sensor_data.humidity, sensor_data.pressure, sensor_data.bboxes);
-            // Free the dynamically allocated bboxes after use
-            if (sensor_data.bboxes != NULL)
+            append_data_to_csv(sensor_data.timestamp,
+                               sensor_data.temperature,
+                               sensor_data.humidity,
+                               sensor_data.pressure,
+                               sensor_data.bboxes);
+
+            // Only free if we own the memory
+            if (sensor_data.bboxes != NULL && sensor_data.owns_bboxes)
             {
                 free(sensor_data.bboxes);
                 sensor_data.bboxes = NULL;
@@ -164,7 +169,7 @@ void create_data_log_queue()
     ESP_LOGI(sdcardTag, "started Q");
     sensor_data_queue = xQueueCreate(10, sizeof(sensor_data_t));
     xTaskCreatePinnedToCore(
-        log_sensor_data_task, "file_upload_task", 8192, // Increased stack size
+        log_sensor_data_task, "log_sensor_data_task", 8192, // Increased stack size
         NULL,
         tskIDLE_PRIORITY + 2, // Slightly higher priority
         NULL,
@@ -338,4 +343,6 @@ void append_data_to_csv(time_t timestamp, float temperature, float humidity, flo
     // Close the file
     fclose(file);
     ESP_LOGI(sdcardTag, "Data appended successfully to CSV file: %s", filepath);
+    // TODO: Movethis somewhere sensible
+    upload_folder();
 }

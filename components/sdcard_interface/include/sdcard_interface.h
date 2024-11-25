@@ -16,7 +16,8 @@ typedef struct
     float temperature;
     float humidity;
     float pressure;
-    char *bboxes; // Adjust size as needed
+    char *bboxes;
+    bool owns_bboxes;
 } sensor_data_t;
 
 // Declare the queue handle as an extern variable
