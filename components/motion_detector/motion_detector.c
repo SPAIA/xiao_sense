@@ -326,7 +326,6 @@ bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detectio
 
     if (!bg_model.initialized)
     {
-        ESP_LOGI(detectorTag, "Background model not yet initialized");
         free(boxes); // Free the allocated memory before returning
         return false;
     }

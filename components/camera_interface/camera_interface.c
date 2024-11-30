@@ -102,7 +102,7 @@ static void configure_sensor_settings(sensor_t *s)
     s->set_wb_mode(s, 0);
     s->set_exposure_ctrl(s, 1);
     s->set_aec2(s, 1);     // Enable advanced exposure control
-    s->set_ae_level(s, 1); // Increased from 0 to 1
+    s->set_ae_level(s, 2); // Increased from 0 to 1
     s->set_gain_ctrl(s, 1);
 
     // Sensor-specific optimizations
@@ -110,7 +110,7 @@ static void configure_sensor_settings(sensor_t *s)
     {
         s->set_gainceiling(s, GAINCEILING_4X); // Increased from 2X to 4X
         s->set_aec_value(s, 500);              // Increased from 200 to 500 for brighter images
-
+        ESP_LOGI(cameraTag, "set ov2640");
         // Additional OV2640-specific settings for low light
         s->set_agc_gain(s, 0); // Auto gain control
         s->set_bpc(s, 0);      // Disable black pixel correction to preserve light
@@ -215,7 +215,7 @@ esp_err_t takeHighResPhoto(time_t timestamp)
 
     highres_config.frame_size = FRAMESIZE_SXGA;
     highres_config.pixel_format = PIXFORMAT_JPEG;
-    highres_config.fb_count = 1;
+    highres_config.fb_count = 2;
 
     esp_err_t ret = ESP_OK;
     if (switch_camera_mode(&highres_config) != ESP_OK)
