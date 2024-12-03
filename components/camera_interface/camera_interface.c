@@ -239,11 +239,12 @@ esp_err_t takeHighResPhoto(time_t timestamp)
     }
 
 exit:
+    vTaskDelay(pdMS_TO_TICKS(100));
     if (pic)
     {
         esp_camera_fb_return(pic);
     }
-
+    vTaskDelay(pdMS_TO_TICKS(100));
     // Switch back to motion detection mode
     camera_config_t motion_config = get_default_camera_config();
     if (sensor_info)
@@ -251,8 +252,8 @@ exit:
         motion_config.xclk_freq_hz = sensor_info->xclk_freq_hz;
     }
     switch_camera_mode(&motion_config);
-    initialize_background_model(320, 240);
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    // initialize_background_model(320, 240);
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     xSemaphoreGive(camera_semaphore);
     return ret;
@@ -287,7 +288,7 @@ void motion_detection_task(void *pvParameters)
             }
             xSemaphoreGive(camera_semaphore);
         }
-        vTaskDelay(pdMS_TO_TICKS(10)); // Add small delay to prevent tight loop
+        vTaskDelay(pdMS_TO_TICKS(50)); // Add small delay to prevent tight loop
     }
 }
 
@@ -304,7 +305,7 @@ void createCameraTask()
         "motion_detection_task",
         8192, // Increased stack size
         NULL,
-        tskIDLE_PRIORITY + 2, // Slightly higher priority
+        tskIDLE_PRIORITY,
         NULL,
         APP_CPU_NUM);
 

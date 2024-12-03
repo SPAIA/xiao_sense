@@ -50,7 +50,7 @@ void start_tasks()
     create_data_log_queue();
     createCameraTask();
 
-    // init_climate();
+    init_climate();
 }
 
 void app_main(void)
