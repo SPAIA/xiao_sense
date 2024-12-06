@@ -83,14 +83,14 @@ void upload_folder()
             ESP_LOGI("MAIN", "Queueing file %s for upload", file_list[i]);
 
             // Monitor stack usage before queuing
-            UBaseType_t stack_high_watermark = uxTaskGetStackHighWaterMark(NULL);
-            ESP_LOGI("MAIN", "Stack high watermark before queue: %d", stack_high_watermark);
+            // UBaseType_t stack_high_watermark = uxTaskGetStackHighWaterMark(NULL);
+            // ESP_LOGI("MAIN", "Stack high watermark before queue: %d", stack_high_watermark);
 
             queue_file_upload(file_list[i], "https://device.spaia.earth/upload");
 
             // Monitor stack usage after queuing
-            stack_high_watermark = uxTaskGetStackHighWaterMark(NULL);
-            ESP_LOGI("MAIN", "Stack high watermark after queue: %d", stack_high_watermark);
+            // stack_high_watermark = uxTaskGetStackHighWaterMark(NULL);
+            // ESP_LOGI("MAIN", "Stack high watermark after queue: %d", stack_high_watermark);
         }
     }
     else

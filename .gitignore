@@ -1,7 +1,6 @@
 .vscode
 .devcontainer
 build
-sdkconfig.*
 managed_components
 .clangd
 .cproject
