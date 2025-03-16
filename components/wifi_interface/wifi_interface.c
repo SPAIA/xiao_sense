@@ -7,6 +7,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "cJSON.h"
 
 #include "lwip/err.h"
 #include "lwip/sys.h"
@@ -31,6 +32,113 @@ static EventGroupHandle_t s_wifi_event_group;
 static const char *TAG = "wifi station";
 
 static int s_retry_num = 0;
+
+esp_err_t read_settings_from_json(const char *file_path, wifi_config_t *wifi_config)
+{
+    if (!file_path || !wifi_config)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    FILE *file = fopen(file_path, "r");
+    if (!file)
+    {
+        ESP_LOGE(TAG, "Failed to open file: %s", file_path);
+        return ESP_FAIL;
+    }
+
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    rewind(file);
+
+    // Allocate buffer
+    char *buffer = malloc(file_size + 1);
+    if (!buffer)
+    {
+        fclose(file);
+        ESP_LOGE(TAG, "Memory allocation failed");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Read file
+    size_t read_size = fread(buffer, 1, file_size, file);
+    fclose(file);
+
+    if (read_size != file_size)
+    {
+        free(buffer);
+        ESP_LOGE(TAG, "Failed to read file completely");
+        return ESP_FAIL;
+    }
+    buffer[file_size] = '\0';
+
+    // Parse JSON
+    cJSON *root = cJSON_Parse(buffer);
+    free(buffer); // Free buffer as soon as we're done with it
+
+    if (!root)
+    {
+        ESP_LOGE(TAG, "Failed to parse JSON");
+        return ESP_FAIL;
+    }
+
+    // Get wifi object
+    cJSON *wifi = cJSON_GetObjectItem(root, "wifi");
+    if (!wifi)
+    {
+        ESP_LOGE(TAG, "Missing 'wifi' settings");
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    // Get individual settings with error checking
+    cJSON *ssid = cJSON_GetObjectItem(wifi, "ssid");
+    cJSON *password = cJSON_GetObjectItem(wifi, "password");
+    cJSON *auth_mode = cJSON_GetObjectItem(wifi, "auth_mode");
+    cJSON *scan_method = cJSON_GetObjectItem(wifi, "scan_method");
+    cJSON *sort_method = cJSON_GetObjectItem(wifi, "sort_method");
+    cJSON *retry_count = cJSON_GetObjectItem(wifi, "retry_count");
+
+    if (!ssid || !cJSON_IsString(ssid) ||
+        !password || !cJSON_IsString(password) ||
+        !auth_mode || !cJSON_IsNumber(auth_mode) ||
+        !scan_method || !cJSON_IsNumber(scan_method) ||
+        !sort_method || !cJSON_IsNumber(sort_method) ||
+        !retry_count || !cJSON_IsNumber(retry_count))
+    {
+        ESP_LOGE(TAG, "Missing or invalid wifi settings");
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    // Copy values with bounds checking
+    size_t ssid_len = strlen(ssid->valuestring);
+    size_t pass_len = strlen(password->valuestring);
+
+    if (ssid_len >= sizeof(wifi_config->sta.ssid) ||
+        pass_len >= sizeof(wifi_config->sta.password))
+    {
+        ESP_LOGE(TAG, "SSID or password too long");
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // Safe copy of strings
+    memset(wifi_config->sta.ssid, 0, sizeof(wifi_config->sta.ssid));
+    memset(wifi_config->sta.password, 0, sizeof(wifi_config->sta.password));
+    memcpy(wifi_config->sta.ssid, ssid->valuestring, ssid_len);
+    memcpy(wifi_config->sta.password, password->valuestring, pass_len);
+
+    // Set other parameters
+    wifi_config->sta.threshold.authmode = auth_mode->valueint;
+    wifi_config->sta.scan_method = scan_method->valueint;
+    wifi_config->sta.sort_method = sort_method->valueint;
+    wifi_config->sta.failure_retry_cnt = retry_count->valueint;
+
+    cJSON_Delete(root);
+    return ESP_OK;
+}
 
 void obtain_time(void *pvParameters)
 {
@@ -161,23 +269,17 @@ void wifi_init_sta(void)
                                                         NULL,
                                                         &instance_got_ip));
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = EXAMPLE_ESP_WIFI_SSID,
-            .password = EXAMPLE_ESP_WIFI_PASS,
-            /* Authmode threshold resets to WPA2 as default if password matches WPA2 standards (password len => 8).
-             * If you want to connect the device to deprecated WEP/WPA networks, Please set the threshold value
-             * to WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK and set the password with length and format matching to
-             * WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK standards.
-             */
-            .threshold.authmode = ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD,
-            // .sae_pwe_h2e = ESP_WIFI_SAE_MODE,
-            // .sae_h2e_identifier = EXAMPLE_H2E_IDENTIFIER,
-            .scan_method = WIFI_FAST_SCAN,
-            .sort_method = WIFI_CONNECT_AP_BY_SIGNAL,
-            .failure_retry_cnt = 10,
-        },
-    };
+    // Initialize wifi_config with zeros
+    wifi_config_t wifi_config = {0};
+
+    // Read configuration from SD card
+    esp_err_t err = read_settings_from_json("/sd/spaia/config.json", &wifi_config);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to read WiFi configuration from SD card");
+        // You might want to load fallback configuration here
+        return;
+    }
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     esp_wifi_set_ps(WIFI_PS_NONE);

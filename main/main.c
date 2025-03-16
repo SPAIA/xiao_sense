@@ -27,8 +27,9 @@ void on_wifi_status_change(bool connected)
 
 void initialize_drivers()
 {
-    initialize_wifi();
     initialize_sdcard();
+    initialize_wifi();
+
     initialize_camera();
     init_file_upload_system();
 }
