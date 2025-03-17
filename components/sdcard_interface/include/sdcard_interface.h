@@ -24,7 +24,7 @@ typedef struct
 extern QueueHandle_t sensor_data_queue;
 
 // Function prototypes
-void initialize_sdcard(void);
+esp_err_t initialize_sdcard(void);
 void deinitialise_sdcard(void);
 esp_err_t saveJpegToSdcard(camera_fb_t *fb, time_t timestamp);
 void create_data_log_queue(void);

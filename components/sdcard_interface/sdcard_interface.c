@@ -176,7 +176,7 @@ void create_data_log_queue()
         PRO_CPU_NUM);
 }
 
-void initialize_sdcard()
+esp_err_t initialize_sdcard()
 {
     esp_err_t ret;
 
@@ -194,9 +194,6 @@ void initialize_sdcard()
     ESP_LOGI(sdcardTag, "Initializing SD card");
 
     // Use settings defined above to initialize SD card and mount FAT filesystem.
-    // Note: esp_vfs_fat_sdmmc/sdspi_mount is all-in-one convenience functions.
-    // Please check its source code and implement error recovery when developing
-    // production applications.
     ESP_LOGI(sdcardTag, "Using SPI peripheral");
 
     spi_bus_config_t bus_cfg = {
@@ -207,22 +204,23 @@ void initialize_sdcard()
         .quadhd_io_num = -1,
         .max_transfer_sz = host.max_freq_khz,
     };
+
+    // Initialize the SPI bus
     ret = spi_bus_initialize(host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
     if (ret != ESP_OK)
     {
         ESP_LOGE(sdcardTag, "Failed to initialize bus.");
-        return;
+        return ret; // Return the error code
     }
 
     // This initializes the slot without card detect (CD) and write protect (WP) signals.
-    // Modify slot_config.gpio_cd and slot_config.gpio_wp if your board has these signals.
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_NUM_CS;
     slot_config.host_id = host.slot;
 
+    // Mount the filesystem
     ESP_LOGI(sdcardTag, "Mounting filesystem");
     ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
-
     if (ret != ESP_OK)
     {
         if (ret == ESP_FAIL)
@@ -236,7 +234,7 @@ void initialize_sdcard()
                                 "Make sure SD card lines have pull-up resistors in place.",
                      esp_err_to_name(ret));
         }
-        return;
+        return ret; // Return the error code
     }
     ESP_LOGI(sdcardTag, "Filesystem mounted");
 
@@ -252,6 +250,7 @@ void initialize_sdcard()
         if (mkdir(spaia_folder, 0755) != 0)
         {
             ESP_LOGE(sdcardTag, "Failed to create 'spaia' folder");
+            return ESP_FAIL; // Return an error code
         }
         else
         {
@@ -263,25 +262,27 @@ void initialize_sdcard()
         ESP_LOGI(sdcardTag, "'spaia' folder already exists");
     }
 
-    // Format FATFS
+    // Format FATFS (if enabled)
 #ifdef FORMAT_SD_CARD
     ret = esp_vfs_fat_sdcard_format(MOUNT_POINT, card);
     if (ret != ESP_OK)
     {
         ESP_LOGE(sdcardTag, "Failed to format FATFS (%s)", esp_err_to_name(ret));
-        return;
+        return ret; // Return the error code
     }
 
     if (stat(file_foo, &st) == 0)
     {
         ESP_LOGI(sdcardTag, "file still exists");
-        return;
+        return ESP_FAIL; // Return an error code
     }
     else
     {
         ESP_LOGI(sdcardTag, "file doesnt exist, format done");
     }
 #endif // CONFIG_EXAMPLE_FORMAT_SD_CARD
+
+    return ESP_OK; // Success
 }
 
 void deinitialise_sdcard()

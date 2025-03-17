@@ -11,7 +11,9 @@ Set the Wi-Fi configuration.
 Set WiFi SSID.
 Set WiFi Password.
 
-You fursther need to enable the option "Support for external, SPI-connected RAM" annd change "Mode (QUAD/OCT) of SPI RAM chip in use" to "octalmode PSRAM"
+You further need to enable the option "Support for external, SPI-connected RAM" annd change "Mode (QUAD/OCT) of SPI RAM chip in use" to "octalmode PSRAM"
+
+Set Long filename support to "in heap"
 
 Set the custom partion table csv to partitions.csv
 
