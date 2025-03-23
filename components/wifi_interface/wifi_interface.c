@@ -32,6 +32,16 @@ static const char *TAG = "wifi station";
 
 static int s_retry_num = 0;
 
+void trim_whitespace(char *str)
+{
+    int i = strlen(str) - 1;
+    while (i >= 0 && (str[i] == ' ' || str[i] == '\n' || str[i] == '\r'))
+    {
+        str[i] = '\0';
+        i--;
+    }
+}
+
 esp_err_t read_settings_from_conf(const char *file_path, wifi_config_t *wifi_config)
 {
     if (!file_path || !wifi_config)
@@ -86,12 +96,16 @@ esp_err_t read_settings_from_conf(const char *file_path, wifi_config_t *wifi_con
         ESP_LOGE(TAG, "SSID or password too long");
         return ESP_ERR_INVALID_SIZE;
     }
-
+    trim_whitespace(ssid);
+    trim_whitespace(password);
     // Safe copy of strings
     memset(wifi_config->sta.ssid, 0, sizeof(wifi_config->sta.ssid));
     memset(wifi_config->sta.password, 0, sizeof(wifi_config->sta.password));
     memcpy(wifi_config->sta.ssid, ssid, ssid_len);
     memcpy(wifi_config->sta.password, password, pass_len);
+
+    ESP_LOGI(TAG, "Read SSID: %s", wifi_config->sta.ssid);
+    ESP_LOGI(TAG, "Read Password: %s", wifi_config->sta.password);
 
     return ESP_OK;
 }
@@ -147,7 +161,6 @@ static void update_wifi_status(bool new_status)
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
 {
-    static int s_retry_num = 0;
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
     {
@@ -155,8 +168,10 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
+        wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
+        ESP_LOGI(TAG, "WiFi disconnected, reason: %d", event->reason);
         update_wifi_status(false);
-        if (s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY)
+        if (s_retry_num < MAXIMUM_RETRY)
         {
             esp_wifi_connect();
             s_retry_num++;
@@ -170,9 +185,10 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
+        s_retry_num = 0;
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_num = 0;
+
         update_wifi_status(true);
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         // TODO: move this somehere more logical
@@ -238,6 +254,10 @@ void wifi_init_sta(void)
         // You might want to load fallback configuration here
         return;
     }
+    else
+    {
+        ESP_LOGI(TAG, "Read settings from SD card ");
+    }
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     esp_wifi_set_ps(WIFI_PS_NONE);
@@ -257,8 +277,7 @@ void wifi_init_sta(void)
      * happened. */
     if (bits & WIFI_CONNECTED_BIT)
     {
-        ESP_LOGI(TAG, "connected to ap SSID:%s password:%s",
-                 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
+        ESP_LOGI(TAG, "connected to ap");
         esp_netif_ip_info_t ip_info;
         esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
         if (netif)
@@ -275,8 +294,7 @@ void wifi_init_sta(void)
     }
     else if (bits & WIFI_FAIL_BIT)
     {
-        ESP_LOGI(TAG, "Failed to connect to SSID:%s, password:%s",
-                 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
+        ESP_LOGI(TAG, "Failed to connect to ap");
     }
     else
     {
