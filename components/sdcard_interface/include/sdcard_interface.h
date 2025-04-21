@@ -5,7 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-#define MAX_FILE_PATH 256
+#define MAX_FILE_PATH 512
 #define MAX_FILES 20
 #define MOUNT_POINT "/sd"
 

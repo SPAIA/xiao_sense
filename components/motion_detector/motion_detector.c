@@ -12,6 +12,16 @@ static const char *detectorTag = "detector";
 #define ALPHA 0.06f         // lower numbers respond to quicker movements, higher numbers reduce noise sensitivity
 #define FRAME_INIT_COUNT 20 // Number of frames to capture before starting motion detection
 
+#define MAX_COMPONENTS 30
+#define NEIGHBORHOOD 1 // defines 8-connected neighborhood
+
+typedef struct
+{
+    int label;
+    size_t x_min, y_min, x_max, y_max;
+    size_t pixel_count;
+} Component;
+
 typedef struct
 {
     size_t x_min, y_min;
@@ -350,45 +360,110 @@ bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detectio
         }
     }
     // Create bounding boxes from clusters of changed pixels
-    if (changed_pixels > 0 && max_boxes > 0)
+    // --- Connected-Component Labeling (CCL) Implementation ---
+
+    int *labels = (int *)calloc(width * height, sizeof(int));
+    Component components[MAX_COMPONENTS];
+    int next_label = 1;
+
+    for (size_t i = 0; i < changed_pixels; i++)
     {
-        size_t cluster_threshold = 20; // Minimum pixel count for a cluster
+        size_t x = pixel_x[i];
+        size_t y = pixel_y[i];
+        size_t idx = y * width + x;
 
-        for (size_t i = 0; i < changed_pixels; i++)
+        if (labels[idx] != 0)
+            continue; // Already labeled
+
+        if (next_label >= MAX_COMPONENTS)
+            break;
+
+        Component comp = {.label = next_label, .x_min = x, .y_min = y, .x_max = x, .y_max = y, .pixel_count = 0};
+
+        size_t queue_capacity = width * height;
+        size_t *queue_x = (size_t *)malloc(queue_capacity * sizeof(size_t));
+        size_t *queue_y = (size_t *)malloc(queue_capacity * sizeof(size_t));
+        size_t q_start = 0, q_end = 0;
+
+        queue_x[q_end] = x;
+        queue_y[q_end++] = y;
+        labels[idx] = next_label;
+
+        while (q_start < q_end)
         {
-            if (box_count >= max_boxes)
-            {
-                break;
-            }
+            size_t cx = queue_x[q_start];
+            size_t cy = queue_y[q_start++];
+            comp.pixel_count++;
 
-            // Simple bounding box creation by finding min/max x and y coordinates of nearby changed pixels
-            BoundingBox box = {
-                .x_min = pixel_x[i],
-                .y_min = pixel_y[i],
-                .x_max = pixel_x[i],
-                .y_max = pixel_y[i]};
+            // Update bounding box limits
+            if (cx < comp.x_min)
+                comp.x_min = cx;
+            if (cy < comp.y_min)
+                comp.y_min = cy;
+            if (cx > comp.x_max)
+                comp.x_max = cx;
+            if (cy > comp.y_max)
+                comp.y_max = cy;
 
-            for (size_t j = i + 1; j < changed_pixels; j++)
+            for (int dy = -NEIGHBORHOOD; dy <= NEIGHBORHOOD; dy++)
             {
-                if (abs((int)pixel_x[i] - (int)pixel_x[j]) < cluster_threshold &&
-                    abs((int)pixel_y[i] - (int)pixel_y[j]) < cluster_threshold)
+                for (int dx = -NEIGHBORHOOD; dx <= NEIGHBORHOOD; dx++)
                 {
-                    // Expand the bounding box
-                    if (pixel_x[j] < box.x_min)
-                        box.x_min = pixel_x[j];
-                    if (pixel_y[j] < box.y_min)
-                        box.y_min = pixel_y[j];
-                    if (pixel_x[j] > box.x_max)
-                        box.x_max = pixel_x[j];
-                    if (pixel_y[j] > box.y_max)
-                        box.y_max = pixel_y[j];
+                    if (dx == 0 && dy == 0)
+                        continue;
+
+                    int nx = (int)cx + dx;
+                    int ny = (int)cy + dy;
+
+                    if (nx < 0 || ny < 0 || nx >= width || ny >= height)
+                        continue;
+
+                    size_t nidx = ny * width + nx;
+
+                    bool neighbor_changed = abs(bg_model.background[nidx] - current_frame->buf[nidx]) > threshold;
+
+                    if (neighbor_changed && labels[nidx] == 0)
+                    {
+                        labels[nidx] = next_label;
+                        queue_x[q_end] = nx;
+                        queue_y[q_end++] = ny;
+                    }
                 }
             }
-
-            boxes[box_count] = box; // Store the bounding box
-            box_count++;            // Increment the box count
         }
+
+        // Filter out small components immediately (noise)
+        if (comp.pixel_count >= 5)
+        {
+            components[next_label - 1] = comp;
+            next_label++;
+        }
+        else
+        {
+            // Reset labels for small component
+            for (size_t k = 0; k < q_end; k++)
+            {
+                labels[queue_y[k] * width + queue_x[k]] = 0;
+            }
+        }
+
+        free(queue_x);
+        free(queue_y);
     }
+
+    // Now create bounding boxes from detected components
+    box_count = 0;
+    for (int i = 0; i < next_label - 1 && box_count < max_boxes; i++)
+    {
+        boxes[box_count++] = (BoundingBox){
+            .x_min = components[i].x_min,
+            .y_min = components[i].y_min,
+            .x_max = components[i].x_max,
+            .y_max = components[i].y_max};
+    }
+
+    free(labels);
+    // --- End of CCL Implementation ---
 
     free(pixel_x);
     free(pixel_y);

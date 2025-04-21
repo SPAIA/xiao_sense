@@ -18,6 +18,14 @@ void init_file_upload_system(void);
  * @return esp_err_t ESP_OK if the upload was queued successfully, ESP_FAIL otherwise
  */
 esp_err_t queue_file_upload(const char *filepath, const char *url);
-void init_file_upload_system(void);
+
+/**
+ * @brief Upload all files in the spaia directory
+ *
+ * This function scans the spaia directory on the SD card and queues all files for upload.
+ *
+ * @return esp_err_t ESP_OK if at least one file was queued, ESP_FAIL otherwise
+ */
+esp_err_t upload_all_files(void);
 
 #endif // FILE_UPLOAD_H

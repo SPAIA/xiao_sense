@@ -11,8 +11,9 @@
 #include "sdcard_config.h"
 #include "sdcard_interface.h"
 #include "file_upload.h"
+#include "upload_manager.h"
 
-#define MAX_FILE_PATH 256
+#define MAX_FILE_PATH 512
 #define MAX_PATH_LEN 512
 
 const char sdcardTag[7] = "sdcard";
@@ -62,7 +63,7 @@ esp_err_t sdcard_read_csv_files(const char *folder_path, char file_list[][MAX_FI
 void upload_folder()
 {
     // Dynamically allocate memory for file list to reduce stack usage
-    char(*file_list)[MAX_FILE_PATH] = malloc(MAX_FILES * MAX_FILE_PATH);
+    char (*file_list)[MAX_FILE_PATH] = malloc(MAX_FILES * MAX_FILE_PATH);
     if (file_list == NULL)
     {
         ESP_LOGE("MAIN", "Failed to allocate memory for file list");
@@ -86,7 +87,7 @@ void upload_folder()
             // UBaseType_t stack_high_watermark = uxTaskGetStackHighWaterMark(NULL);
             // ESP_LOGI("MAIN", "Stack high watermark before queue: %d", stack_high_watermark);
 
-            queue_file_upload(file_list[i], "https://device.spaia.earth/upload");
+            upload_manager_notify_new_file(file_list[i]);
 
             // Monitor stack usage after queuing
             // stack_high_watermark = uxTaskGetStackHighWaterMark(NULL);
@@ -131,9 +132,9 @@ esp_err_t saveJpegToSdcard(camera_fb_t *captureImage, time_t timestamp)
     }
 
     ESP_LOGI(sdcardTag, "JPEG saved as %s", filename);
-    vTaskDelay(pdMS_TO_TICKS(500));
 
-    esp_err_t upload_result = queue_file_upload(filename, "https://device.spaia.earth/upload");
+    // Use the upload manager to handle the file upload
+    esp_err_t upload_result = upload_manager_notify_new_file(filename);
     if (upload_result != ESP_OK)
     {
         ESP_LOGE(sdcardTag, "Failed to queue file upload for %s", filename);
@@ -344,6 +345,8 @@ void append_data_to_csv(time_t timestamp, float temperature, float humidity, flo
     // Close the file
     fclose(file);
     ESP_LOGI(sdcardTag, "Data appended successfully to CSV file: %s", filepath);
-    // TODO: Movethis somewhere sensible
-    upload_folder();
+
+    // Notify the upload manager about the new/updated file
+    // This will trigger an immediate upload if the interval is 0 (real-time mode)
+    upload_manager_notify_new_file(filepath);
 }

@@ -9,6 +9,7 @@
 #include "camera_config.h"
 #include "camera_interface.h"
 #include "img_converters.h"
+#include "upload_manager.h"
 
 const char cameraTag[7] = "camera";
 
@@ -232,9 +233,35 @@ esp_err_t takeHighResPhoto(time_t timestamp)
         goto exit;
     }
 
-    if (saveJpegToSdcard(pic, timestamp) != ESP_OK)
+    // First save the image to the SD card
+    char filename[64];
+    snprintf(filename, sizeof(filename), "%s/spaia/%lld.jpg", MOUNT_POINT, (long long)timestamp);
+
+    // Create the file and write the JPEG data
+    FILE *fp = fopen(filename, "wb");
+    if (fp == NULL)
     {
-        ESP_LOGE(cameraTag, "Failed to save image");
+        ESP_LOGE(cameraTag, "Failed to create file: %s", filename);
+        ret = ESP_FAIL;
+        goto exit;
+    }
+
+    size_t bytes_written = fwrite(pic->buf, 1, pic->len, fp);
+    fclose(fp);
+
+    if (bytes_written != pic->len)
+    {
+        ESP_LOGE(cameraTag, "Failed to write all data to file: %s", filename);
+        ret = ESP_FAIL;
+        goto exit;
+    }
+
+    ESP_LOGI(cameraTag, "JPEG saved as %s", filename);
+
+    // Now notify the upload manager with the correct file path
+    if (upload_manager_notify_new_file(filename) != ESP_OK)
+    {
+        ESP_LOGE(cameraTag, "Failed to queue file for upload");
         ret = ESP_FAIL;
     }
 
@@ -281,6 +308,9 @@ void motion_detection_task(void *pvParameters)
                     {
                         ESP_LOGE(cameraTag, "Failed to take high-res photo");
                     }
+
+                    // Add a delay after motion detection to allow background model to stabilize
+                    vTaskDelay(pdMS_TO_TICKS(500)); // 500ms delay after motion detection
 
                     continue; // Skip the second fb_return and semaphore give
                 }

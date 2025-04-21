@@ -6,8 +6,11 @@
 #include "sdcard_interface.h"
 #include "wifi_interface.h"
 #include "esp_crt_bundle.h"
+#include <dirent.h>
+#include <sys/stat.h>
+#include <string.h>
 
-#define MAX_FILE_PATH 64
+// Using MAX_FILE_PATH from sdcard_interface.h
 #define MAX_URL_LENGTH 256
 #define QUEUE_SIZE 10
 
@@ -16,7 +19,7 @@
 #include "esp_crt_bundle.h"
 typedef struct
 {
-    char filepath[256];
+    char filepath[512]; // Increased buffer size to prevent truncation
     char url[256];
 } UploadRequest;
 
@@ -144,24 +147,57 @@ void file_upload_task(void *pvParameters)
 {
     UploadRequest request;
     struct stat st;
+    bool wifi_was_enabled = false;
 
     for (;;)
     {
         if (xQueueReceive(upload_queue, &request, portMAX_DELAY) == pdTRUE)
         {
-            if (stat(request.filepath, &st) == 0 && is_wifi_connected())
+            if (stat(request.filepath, &st) == 0)
             {
-                ESP_LOGI(TAG, "File exists, starting upload: %s", request.filepath);
-                esp_err_t result = upload_file_to_https(request.filepath, request.url, CONFIG_SPAIA_DEVICE_ID);
-                if (result == ESP_OK)
+                // Check if WiFi is already connected
+                wifi_was_enabled = is_wifi_connected();
+
+                // If WiFi is not connected, enable it for the upload
+                if (!wifi_was_enabled)
                 {
-                    ESP_LOGI(TAG, "Upload completed successfully");
-                    // Optionally, delete the file after successful upload
-                    // unlink(request.filepath);
+                    ESP_LOGI(TAG, "Enabling WiFi for upload...");
+                    esp_err_t wifi_result = wifi_enable();
+                    if (wifi_result != ESP_OK)
+                    {
+                        ESP_LOGE(TAG, "Failed to enable WiFi, cannot upload file");
+                        continue; // Skip this upload and wait for the next one
+                    }
+                    // Give some time for WiFi to fully connect and stabilize
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                }
+
+                // Check again if WiFi is connected before attempting upload
+                if (is_wifi_connected())
+                {
+                    ESP_LOGI(TAG, "File exists, starting upload: %s", request.filepath);
+                    esp_err_t result = upload_file_to_https(request.filepath, request.url, CONFIG_SPAIA_DEVICE_ID);
+                    if (result == ESP_OK)
+                    {
+                        ESP_LOGI(TAG, "Upload completed successfully");
+                        // Optionally, delete the file after successful upload
+                        // unlink(request.filepath);
+                    }
+                    else
+                    {
+                        ESP_LOGE(TAG, "Upload failed");
+                    }
+
+                    // If WiFi was disabled before the upload, disable it again to save power
+                    if (!wifi_was_enabled)
+                    {
+                        ESP_LOGI(TAG, "Disabling WiFi after upload to save power...");
+                        wifi_disable();
+                    }
                 }
                 else
                 {
-                    ESP_LOGE(TAG, "Upload failed");
+                    ESP_LOGE(TAG, "WiFi not connected, cannot upload file");
                 }
             }
             else
@@ -199,4 +235,62 @@ esp_err_t queue_file_upload(const char *filepath, const char *url)
         return ESP_FAIL;
     }
     return ESP_OK;
+}
+
+/**
+ * @brief Upload all files in the spaia directory
+ *
+ * This function scans the spaia directory on the SD card and queues all files for upload.
+ *
+ * @return esp_err_t ESP_OK if at least one file was queued, ESP_FAIL otherwise
+ */
+esp_err_t upload_all_files(void)
+{
+    ESP_LOGI(TAG, "Scanning for files to upload in %s/spaia", MOUNT_POINT);
+
+    // Open the directory
+    DIR *dir = opendir(MOUNT_POINT "/spaia");
+    if (!dir)
+    {
+        ESP_LOGE(TAG, "Failed to open directory: %s/spaia", MOUNT_POINT);
+        return ESP_FAIL;
+    }
+
+    struct dirent *entry;
+    bool files_queued = false;
+
+    // Read all entries in the directory
+    while ((entry = readdir(dir)) != NULL)
+    {
+        // Skip "." and ".." entries
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+        {
+            continue;
+        }
+
+        // Construct the full file path
+        char filepath[512]; // Increased buffer size to prevent truncation
+        snprintf(filepath, sizeof(filepath), "%s/spaia/%s", MOUNT_POINT, entry->d_name);
+
+        // Queue the file for upload
+        ESP_LOGI(TAG, "Queueing file for upload: %s", filepath);
+        esp_err_t result = queue_file_upload(filepath, "https://device.spaia.earth/upload");
+        if (result == ESP_OK)
+        {
+            files_queued = true;
+        }
+    }
+
+    closedir(dir);
+
+    if (files_queued)
+    {
+        ESP_LOGI(TAG, "Successfully queued files for upload");
+        return ESP_OK;
+    }
+    else
+    {
+        ESP_LOGI(TAG, "No files found to upload");
+        return ESP_FAIL;
+    }
 }
