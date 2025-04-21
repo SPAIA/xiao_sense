@@ -68,14 +68,15 @@ static camera_config_t get_default_camera_config(void)
         .pin_href = HREF_GPIO_NUM,
         .pin_pclk = PCLK_GPIO_NUM,
 
-        // Start with conservative settings
+        // Memory-efficient settings to prevent fragmentation
         .xclk_freq_hz = 10000000, // Will be updated based on sensor
         .fb_location = CAMERA_FB_IN_PSRAM,
         .pixel_format = PIXFORMAT_GRAYSCALE,
         .frame_size = FRAMESIZE_QVGA,
         .jpeg_quality = 10,
-        .fb_count = 2,
-        .grab_mode = CAMERA_GRAB_LATEST // Changed from WHEN_EMPTY to reduce overflow
+        .fb_count = 1,                   // Reduced from 2 to 1 to save memory
+        .grab_mode = CAMERA_GRAB_LATEST, // Changed from WHEN_EMPTY to reduce overflow
+        .sccb_i2c_port = 1               // Explicitly set I2C port
     };
     return config;
 }
@@ -130,6 +131,26 @@ static void configure_sensor_settings(sensor_t *s)
     }
 }
 
+// Helper function to force memory cleanup
+static void force_memory_cleanup(void)
+{
+    // Print memory info for debugging
+    ESP_LOGI(cameraTag, "Forcing memory cleanup");
+
+    // Force a garbage collection cycle
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Allocate and free a large block to help consolidate memory
+    void *temp = heap_caps_malloc(32768, MALLOC_CAP_SPIRAM);
+    if (temp)
+    {
+        memset(temp, 0, 32768);
+        heap_caps_free(temp);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+}
+
 esp_err_t initialize_camera(void)
 {
     camera_semaphore = xSemaphoreCreateMutex();
@@ -139,15 +160,36 @@ esp_err_t initialize_camera(void)
         return ESP_FAIL;
     }
 
+    // Force memory cleanup before initialization
+    force_memory_cleanup();
+
     // Get initial camera config
     camera_config_t camera_config = get_default_camera_config();
+
+    // Try with smaller frame size first
+    camera_config.frame_size = FRAMESIZE_QVGA;
+    camera_config.fb_count = 1;
 
     // First initialization attempt
     esp_err_t ret = esp_camera_init(&camera_config);
     if (ret != ESP_OK)
     {
-        ESP_LOGE(cameraTag, "Camera init failed with error 0x%x", ret);
-        return ret;
+        ESP_LOGE(cameraTag, "Camera init failed with error 0x%x, trying with minimal settings", ret);
+
+        // Try with even smaller frame size
+        camera_config.frame_size = FRAMESIZE_QQVGA;
+        camera_config.pixel_format = PIXFORMAT_GRAYSCALE;
+        camera_config.fb_count = 1;
+
+        // Force memory cleanup again
+        force_memory_cleanup();
+
+        ret = esp_camera_init(&camera_config);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGE(cameraTag, "Camera init still failed with minimal settings: 0x%x", ret);
+            return ret;
+        }
     }
 
     // Get sensor info and update configuration
@@ -161,6 +203,7 @@ esp_err_t initialize_camera(void)
         if (camera_config.xclk_freq_hz != 10000000)
         {
             esp_camera_deinit();
+            force_memory_cleanup();
             ret = esp_camera_init(&camera_config);
             if (ret != ESP_OK)
             {
@@ -188,15 +231,115 @@ esp_err_t switch_camera_mode(camera_config_t *config)
         return err;
     }
 
+    // Force memory cleanup
+    force_memory_cleanup();
+
+    // Try to initialize with the provided config
     err = esp_camera_init(config);
     if (err != ESP_OK)
     {
-        ESP_LOGE(cameraTag, "Camera init failed: %s", esp_err_to_name(err));
-        return err;
+        ESP_LOGW(cameraTag, "Camera init failed with error 0x%x, trying with reduced buffer size", err);
+
+        // Reduce buffer count and try again
+        config->fb_count = 1;
+
+        // Force memory cleanup again
+        force_memory_cleanup();
+
+        // Try again with reduced settings
+        err = esp_camera_init(config);
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(cameraTag, "Camera init still failed, trying with smaller frame size");
+
+            // Try with a smaller frame size
+            framesize_t original_size = config->frame_size;
+            if (config->frame_size > FRAMESIZE_QVGA)
+            {
+                config->frame_size = FRAMESIZE_QVGA;
+            }
+            else if (config->frame_size > FRAMESIZE_QQVGA)
+            {
+                config->frame_size = FRAMESIZE_QQVGA;
+            }
+
+            if (config->frame_size != original_size)
+            {
+                ESP_LOGI(cameraTag, "Reduced frame size from %d to %d", original_size, config->frame_size);
+
+                // Force memory cleanup once more
+                force_memory_cleanup();
+
+                err = esp_camera_init(config);
+                if (err != ESP_OK)
+                {
+                    ESP_LOGE(cameraTag, "Camera init failed with all fallback options: %s", esp_err_to_name(err));
+                    return err;
+                }
+            }
+            else
+            {
+                ESP_LOGE(cameraTag, "Camera init failed with smallest possible frame size: %s", esp_err_to_name(err));
+                return err;
+            }
+        }
     }
 
     configure_sensor_settings(esp_camera_sensor_get());
     return ESP_OK;
+}
+
+// Try to take a photo with progressively lower resolutions until successful
+static camera_fb_t *try_capture_with_fallback(camera_config_t *config, int max_attempts)
+{
+    framesize_t resolutions[] = {
+        FRAMESIZE_SXGA, // 1280x1024
+        FRAMESIZE_XGA,  // 1024x768
+        FRAMESIZE_SVGA, // 800x600
+        FRAMESIZE_VGA,  // 640x480
+        FRAMESIZE_QVGA, // 320x240
+        FRAMESIZE_QQVGA // 160x120
+    };
+
+    int start_idx = 0;
+    // Find starting index based on current config
+    for (int i = 0; i < sizeof(resolutions) / sizeof(resolutions[0]); i++)
+    {
+        if (config->frame_size == resolutions[i])
+        {
+            start_idx = i;
+            break;
+        }
+    }
+
+    camera_fb_t *pic = NULL;
+    int attempts = 0;
+
+    // Try with progressively lower resolutions
+    for (int i = start_idx; i < sizeof(resolutions) / sizeof(resolutions[0]) && attempts < max_attempts; i++, attempts++)
+    {
+        config->frame_size = resolutions[i];
+        ESP_LOGI(cameraTag, "Trying to capture with resolution %d", config->frame_size);
+
+        if (switch_camera_mode(config) != ESP_OK)
+        {
+            ESP_LOGW(cameraTag, "Failed to switch camera mode to resolution %d", config->frame_size);
+            continue;
+        }
+
+        pic = esp_camera_fb_get();
+        if (pic)
+        {
+            ESP_LOGI(cameraTag, "Successfully captured image at resolution %d", config->frame_size);
+            return pic;
+        }
+
+        ESP_LOGW(cameraTag, "Failed to capture image at resolution %d", config->frame_size);
+        // Force memory cleanup before trying next resolution
+        force_memory_cleanup();
+    }
+
+    return NULL; // Failed to capture with any resolution
 }
 
 esp_err_t takeHighResPhoto(time_t timestamp)
@@ -206,23 +349,35 @@ esp_err_t takeHighResPhoto(time_t timestamp)
         return ESP_FAIL;
     }
 
+    // Force memory cleanup before starting
+    force_memory_cleanup();
+
     camera_config_t highres_config = get_default_camera_config();
-    custom_sensor_info_t *sensor_info = get_sensor_info(); // Use custom_sensor_info_t instead
+    custom_sensor_info_t *sensor_info = get_sensor_info();
 
     if (sensor_info)
     {
         highres_config.xclk_freq_hz = sensor_info->xclk_freq_hz;
     }
 
-    highres_config.frame_size = FRAMESIZE_SXGA;
+    // Use memory-efficient settings
     highres_config.pixel_format = PIXFORMAT_JPEG;
-    highres_config.fb_count = 2;
+    highres_config.fb_count = 1;
+    highres_config.jpeg_quality = 15;           // Lower quality to reduce memory usage
+    highres_config.frame_size = FRAMESIZE_SXGA; // Start with high resolution, will fall back if needed
 
     esp_err_t ret = ESP_OK;
     if (switch_camera_mode(&highres_config) != ESP_OK)
     {
-        xSemaphoreGive(camera_semaphore);
-        return ESP_FAIL;
+        ESP_LOGW(cameraTag, "Failed to switch to high-res mode, trying with lower resolution");
+
+        // Try with a lower resolution
+        highres_config.frame_size = FRAMESIZE_XGA;
+        if (switch_camera_mode(&highres_config) != ESP_OK)
+        {
+            xSemaphoreGive(camera_semaphore);
+            return ESP_FAIL;
+        }
     }
 
     camera_fb_t *pic = esp_camera_fb_get();
@@ -230,7 +385,7 @@ esp_err_t takeHighResPhoto(time_t timestamp)
     {
         ESP_LOGE(cameraTag, "Camera capture failed");
         ret = ESP_FAIL;
-        goto exit;
+        goto exit_no_pic;
     }
 
     // First save the image to the SD card
@@ -266,21 +421,49 @@ esp_err_t takeHighResPhoto(time_t timestamp)
     }
 
 exit:
-    vTaskDelay(pdMS_TO_TICKS(100));
     if (pic)
     {
         esp_camera_fb_return(pic);
+        pic = NULL;
     }
-    vTaskDelay(pdMS_TO_TICKS(100));
-    // Switch back to motion detection mode
+
+    // Force memory cleanup after photo capture and before switching back
+    force_memory_cleanup();
+
+exit_no_pic:
+    // Switch back to motion detection mode with minimal memory settings
     camera_config_t motion_config = get_default_camera_config();
     if (sensor_info)
     {
         motion_config.xclk_freq_hz = sensor_info->xclk_freq_hz;
     }
-    switch_camera_mode(&motion_config);
-    // initialize_background_model(320, 240);
-    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Use very memory-efficient settings for motion detection
+    motion_config.frame_size = FRAMESIZE_QVGA; // Smaller frame size for motion detection
+    motion_config.fb_count = 1;
+    motion_config.pixel_format = PIXFORMAT_GRAYSCALE; // Use grayscale to save memory
+
+    // Try to switch back to motion detection mode
+    esp_err_t switch_err = switch_camera_mode(&motion_config);
+    if (switch_err != ESP_OK)
+    {
+        ESP_LOGE(cameraTag, "Failed to switch back to motion detection mode: %s", esp_err_to_name(switch_err));
+
+        // Complete camera reset as a last resort
+        esp_camera_deinit();
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        // Force memory cleanup
+        force_memory_cleanup();
+
+        // Try to reinitialize from scratch
+        if (initialize_camera() != ESP_OK)
+        {
+            ESP_LOGE(cameraTag, "Critical error: Failed to reinitialize camera");
+            // At this point, we might need to reboot the system
+            // But for now, we'll just continue and hope for the best
+        }
+    }
 
     xSemaphoreGive(camera_semaphore);
     return ret;

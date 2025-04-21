@@ -34,7 +34,7 @@ void on_wifi_status_change(bool connected)
         createCameraTask();
 
         ESP_ERROR_CHECK(aht_init(AHT_I2C_SDA_GPIO, AHT_I2C_SCL_GPIO, AHT_I2C_PORT));
-        ESP_ERROR_CHECK(aht_create_task(10000, 0));
+        ESP_ERROR_CHECK(aht_create_task(3600000, 0)); // Update every hour (3600000 ms)
     }
     else if (!connected && upload_task_started)
     {

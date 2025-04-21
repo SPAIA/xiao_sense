@@ -12,6 +12,7 @@
 #include "sdcard_interface.h"
 #include "file_upload.h"
 #include "upload_manager.h"
+#include "aht_interface.h" // Include AHT interface for temperature and humidity values
 
 #define MAX_FILE_PATH 512
 #define MAX_PATH_LEN 512
@@ -338,9 +339,16 @@ void append_data_to_csv(time_t timestamp, float temperature, float humidity, flo
         ESP_LOGI(sdcardTag, "Created new CSV file with header: %s", filepath);
     }
 
-    // Write the data to the CSV file
+    // Get the latest temperature and humidity values from AHT sensor
+    float aht_temperature = aht_get_temperature();
+    float aht_humidity = aht_get_humidity();
+
+    ESP_LOGI(sdcardTag, "Using AHT values - Temperature: %.2f°C, Humidity: %.2f%%",
+             aht_temperature, aht_humidity);
+
+    // Write the data to the CSV file, using AHT values for temperature and humidity
     fprintf(file, "%lld,%f,%f,%f,%s\n",
-            (long long)timestamp, temperature, humidity, pressure, bboxes ? bboxes : "");
+            (long long)timestamp, aht_temperature, aht_humidity, pressure, bboxes ? bboxes : "");
 
     // Close the file
     fclose(file);
