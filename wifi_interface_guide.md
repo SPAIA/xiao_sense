@@ -293,7 +293,6 @@ void on_wifi_status_change(bool connected)
         ESP_LOGI(TAG, "WiFi connected - initializing subsystems");
 
         // Now safe to bring up power-hungry and blocking tasks
-        initialize_camera();
         init_file_upload_system();
 
         upload_folder();
