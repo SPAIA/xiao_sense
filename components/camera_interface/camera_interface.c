@@ -44,12 +44,17 @@ static camera_config_t cfg_low;  // QVGA grayscale
 static camera_config_t cfg_high; // SXGA jpeg
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Power gating helper (optional – tie PWDN pin)
 // ──────────────────────────────────────────────────────────────────────────────
+// Power‑gate helper – boards like XIAO Sense wire PWDN to nothing (‐1). Guard it.
+// ──────────────────────────────────────────────────────────────────────────────
+#if (PWDN_GPIO_NUM >= 0)
 static inline void sensor_gate(bool on)
 {
     gpio_set_level(PWDN_GPIO_NUM, on ? 0 : 1);
 }
+#else
+static inline void sensor_gate(bool on) { (void)on; }
+#endif
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Re‑init wrapper (deinit + init). Must be called with cam_mux held.
@@ -171,7 +176,15 @@ esp_err_t camera_manager_capture(time_t ts)
         esp_camera_fb_return(fb);
         goto fail;
     }
-    fwrite(fb->buf, 1, fb->len, f);
+    size_t written = fwrite(fb->buf, 1, fb->len, f);
+    if (written != fb->len)
+    {
+        ESP_LOGE(TAG, "Write failed: %d/%d bytes", written, fb->len);
+        fclose(f);
+        remove(path); // Optional: Clean up partial file
+        esp_camera_fb_return(fb);
+        goto fail;
+    }
     fclose(f);
     upload_manager_notify_new_file(path);
     esp_camera_fb_return(fb);
