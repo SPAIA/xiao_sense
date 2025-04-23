@@ -5,6 +5,7 @@
 #include "file_upload.h"
 #include "aht_interface.h"
 #include "esp_log.h"
+#include "upload_manager.h"
 
 static bool upload_task_started = false;
 
@@ -43,6 +44,8 @@ void start_tasks()
     if (is_wifi_connected())
     {
         // WiFi already connected, start upload task immediately
+        // Initialize upload manager first
+        upload_manager_init(0);
         upload_folder();
         upload_task_started = true;
     }
