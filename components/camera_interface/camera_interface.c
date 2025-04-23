@@ -62,14 +62,30 @@ static inline void sensor_gate(bool on) { (void)on; }
 static esp_err_t reinit_camera(const camera_config_t *cfg)
 {
     esp_camera_deinit();
-    esp_err_t err = esp_camera_init(cfg);
-    if (err != ESP_OK)
+    vTaskDelay(pdMS_TO_TICKS(50)); // Allow power stabilization
+
+    // Retry with exponential backoff
+    for (int retry = 0; retry < 3; retry++)
     {
-        ESP_LOGE(TAG, "reinit fail 0x%x", err);
-        return err;
+        esp_err_t err = esp_camera_init(cfg);
+        if (err == ESP_OK)
+        {
+            sensor = esp_camera_sensor_get();
+            return ESP_OK;
+        }
+        ESP_LOGE(TAG, "Camera init failed 0x%x (attempt %d)", err, retry + 1);
+        vTaskDelay(pdMS_TO_TICKS(100 * (retry + 1)));
     }
-    sensor = esp_camera_sensor_get();
-    return ESP_OK;
+
+    // Final attempt without delay
+    esp_err_t err = esp_camera_init(cfg);
+    if (err == ESP_OK)
+    {
+        sensor = esp_camera_sensor_get();
+        return ESP_OK;
+    }
+    ESP_LOGE(TAG, "Final camera init failure 0x%x", err);
+    return ESP_FAIL;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

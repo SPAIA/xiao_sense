@@ -61,11 +61,13 @@ void start_tasks()
 
 void app_main(void)
 {
+    esp_reset_reason_t reason = esp_reset_reason();
+    ESP_LOGI(TAG, "Reset reason: %d", reason);
     initialize_drivers();
     vTaskDelay(pdMS_TO_TICKS(1000));
     start_tasks();
-    // ESP_ERROR_CHECK(aht_init(AHT_I2C_SDA_GPIO, AHT_I2C_SCL_GPIO, AHT_I2C_PORT));
+    ESP_ERROR_CHECK(aht_init(AHT_I2C_SDA_GPIO, AHT_I2C_SCL_GPIO, AHT_I2C_PORT));
 
     // Create task to read sensor every 30 minutes (1800000 ms)
-    // ESP_ERROR_CHECK(aht_create_task(10000, 0)); // Run on core 0
+    ESP_ERROR_CHECK(aht_create_task(1800000, 0)); // Run on core 0
 }

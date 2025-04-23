@@ -39,12 +39,12 @@ static bool s_init_done = false;
 /* -------------------------------------------------------------------------- */
 static inline esp_err_t aht_write(const uint8_t *data, size_t len)
 {
-    return i2c_master_transmit(s_dev, data, len, -1 /* block for ever */);
+    return i2c_master_transmit(s_dev, data, len, pdMS_TO_TICKS(100));
 }
 
 static inline esp_err_t aht_read(uint8_t *data, size_t len)
 {
-    return i2c_master_receive(s_dev, data, len, -1);
+    return i2c_master_receive(s_dev, data, len, pdMS_TO_TICKS(100));
 }
 
 static esp_err_t aht_bus_init(i2c_port_t port, gpio_num_t sda, gpio_num_t scl)

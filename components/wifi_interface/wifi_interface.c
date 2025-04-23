@@ -300,8 +300,8 @@ esp_err_t read_settings_from_conf(const char *file_path, wifi_config_t *wifi_con
     }
 
     // DEBUG ONLY - Log decrypted password (REMOVE THIS IN PRODUCTION)
-    ESP_LOGI(TAG, "DEBUG - Decrypted password: %s", decrypted_password);
-    ESP_LOGI(TAG, "DEBUG - Password length: %d", strlen(decrypted_password));
+    // ESP_LOGI(TAG, "DEBUG - Decrypted password: %s", decrypted_password);
+    // ESP_LOGI(TAG, "DEBUG - Password length: %d", strlen(decrypted_password));
 
     size_t ssid_len = strlen(ssid);
     size_t pass_len = strlen(decrypted_password);
