@@ -19,6 +19,7 @@
 #include "motion_detector.h"
 #include "sdcard_interface.h"
 #include "upload_manager.h"
+#include "esp_heap_caps.h"
 
 static const char TAG[] = "cam_mgr";
 
@@ -56,6 +57,14 @@ static inline void sensor_gate(bool on)
 static inline void sensor_gate(bool on) { (void)on; }
 #endif
 
+void log_heap_stats(const char *label)
+{
+    multi_heap_info_t info;
+    heap_caps_get_info(&info, MALLOC_CAP_SPIRAM);
+    ESP_LOGI("HEAP", "[%s] PSRAM Free: %d bytes, Largest block: %d bytes, Blocks: %d",
+             label, info.total_free_bytes, info.largest_free_block, info.free_blocks);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Re‑init wrapper (deinit + init). Must be called with cam_mux held.
 // ──────────────────────────────────────────────────────────────────────────────
@@ -67,18 +76,24 @@ static esp_err_t reinit_camera(const camera_config_t *cfg)
     // Retry with exponential backoff
     for (int retry = 0; retry < 3; retry++)
     {
+        log_heap_stats("Before cam init");
         esp_err_t err = esp_camera_init(cfg);
+        log_heap_stats("After cam init");
         if (err == ESP_OK)
         {
             sensor = esp_camera_sensor_get();
             return ESP_OK;
         }
         ESP_LOGE(TAG, "Camera init failed 0x%x (attempt %d)", err, retry + 1);
+        esp_camera_deinit();
         vTaskDelay(pdMS_TO_TICKS(100 * (retry + 1)));
     }
 
     // Final attempt without delay
+    esp_camera_deinit();
+    log_heap_stats("before cam init");
     esp_err_t err = esp_camera_init(cfg);
+    log_heap_stats("After cam init");
     if (err == ESP_OK)
     {
         sensor = esp_camera_sensor_get();
@@ -129,7 +144,7 @@ static void build_configs(void)
     // High‑res capture config
     cfg_high.xclk_freq_hz = 20000000; // full speed
     cfg_high.pixel_format = PIXFORMAT_JPEG;
-    cfg_high.frame_size = FRAMESIZE_SXGA; // 1280×1024
+    cfg_high.frame_size = FRAMESIZE_SVGA; // 1280×1024
     cfg_high.jpeg_quality = 15;
 }
 
