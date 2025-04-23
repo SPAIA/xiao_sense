@@ -4,7 +4,7 @@
 #include "freertos/event_groups.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
-#include "esp_event.h"
+#include <esp_event.h>
 #include "esp_log.h"
 #include "nvs_flash.h"
 
@@ -332,9 +332,9 @@ void obtain_time(void *pvParameters)
     ESP_LOGI(TAG, "Starting NTP sync task.");
 
     // Initialize SNTP
-    sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    sntp_setservername(0, "pool.ntp.org"); // Use default NTP server, you can replace with a specific one
-    sntp_init();
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org"); // Use default NTP server, you can replace with a specific one
+    esp_sntp_init();
 
     // Wait for time to be set via NTP
     time_t now = 0;
@@ -408,7 +408,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
 
         update_wifi_status(true);
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        // TODO: move this somehere more logical
+        // TODO: move this somewhere more logical
         //  Create a FreeRTOS task to fetch NTP time once connected
         xTaskCreatePinnedToCore(obtain_time, "obtain_time", 4096, NULL, 7, NULL, PRO_CPU_NUM);
     }
@@ -429,11 +429,18 @@ esp_err_t register_wifi_status_callback(wifi_status_callback_t callback)
     return ESP_OK;
 }
 
-void wifi_init_sta(void)
+esp_err_t wifi_init_sta(void)
 {
     s_wifi_event_group = xEventGroupCreate();
 
-    ESP_ERROR_CHECK(esp_netif_init());
+    // Only initialize if not already done
+    if (esp_netif_init() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Network interface initialization failed");
+        return ESP_FAIL;
+    }
+
+    // Create default event loop (safe to call even if already exists)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
 
@@ -504,6 +511,7 @@ void wifi_init_sta(void)
         ESP_LOGW(TAG, "WiFi connection timed out");
         esp_wifi_stop(); // cleanup after failure
     }
+    return ESP_OK;
 }
 esp_err_t wifi_enable(void)
 {
@@ -517,10 +525,12 @@ esp_err_t wifi_enable(void)
 
     // Initialize WiFi if not already initialized
     static bool wifi_initialized = false;
+    esp_err_t ret = ESP_OK;
+
     if (!wifi_initialized)
     {
         // Initialize NVS if this is the first time
-        esp_err_t ret = nvs_flash_init();
+        ret = nvs_flash_init();
         if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
         {
             ESP_ERROR_CHECK(nvs_flash_erase());
@@ -529,8 +539,16 @@ esp_err_t wifi_enable(void)
         ESP_ERROR_CHECK(ret);
 
         ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
-        wifi_init_sta();
-        wifi_initialized = true;
+        ret = wifi_init_sta();
+        if (ret == ESP_OK)
+        {
+            wifi_initialized = true;
+        }
+        else
+        {
+            ESP_LOGE(TAG, "WiFi initialization failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
     }
     else
     {
@@ -561,6 +579,8 @@ esp_err_t wifi_enable(void)
 
 esp_err_t wifi_disable(void)
 {
+    esp_err_t ret = ESP_OK;
+
     if (!is_wifi_connected())
     {
         ESP_LOGI(TAG, "WiFi already disabled");
@@ -568,18 +588,26 @@ esp_err_t wifi_disable(void)
     }
 
     ESP_LOGI(TAG, "Disabling WiFi to save power...");
-    esp_err_t ret = esp_wifi_stop();
+
+    // Stop WiFi first
+    ret = esp_wifi_stop();
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to disable WiFi: %s", esp_err_to_name(ret));
-        return ret;
+    }
+
+    // Cleanup resources - safe to call even if no default loop exists
+    esp_err_t err = esp_event_loop_delete_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
+    {
+        ESP_ERROR_CHECK(err);
     }
 
     ESP_LOGI(TAG, "WiFi disabled successfully");
     return ESP_OK;
 }
 
-void initialize_wifi(void)
+esp_err_t initialize_wifi(void)
 {
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -591,5 +619,11 @@ void initialize_wifi(void)
     ESP_ERROR_CHECK(ret);
 
     ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
-    wifi_init_sta();
+    ret = wifi_init_sta();
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "WiFi initialization failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    return ESP_OK;
 }

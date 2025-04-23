@@ -5,7 +5,7 @@
 #include "esp_err.h"
 
 // Initialize the WiFi system
-void initialize_wifi(void);
+esp_err_t initialize_wifi(void);
 
 // Get current WiFi connection status
 bool is_wifi_connected(void);
