@@ -2,7 +2,7 @@
 #define AHT_INTERFACE_H
 
 #include "esp_err.h"
-#include "i2cdev.h"
+#include "driver/i2c.h"
 
 // Default I2C settings
 #define AHT_I2C_PORT I2C_NUM_0
@@ -13,7 +13,12 @@
 // AHT20 commands
 #define AHT_CMD_INIT 0xBE
 #define AHT_CMD_TRIGGER 0xAC
+#define AHT_CMD_RESET 0xBA
+#define AHT_CMD_STATUS 0x71
 #define AHT_DATA_BYTES 7
+
+// I2C master port
+#define I2C_MASTER_PORT AHT_I2C_PORT
 
 /**
  * @brief Initialize the AHT20 sensor
@@ -24,7 +29,7 @@
  *
  * @return ESP_OK if successful, otherwise an error code
  */
-esp_err_t aht_init(int sda_gpio, int scl_gpio, i2c_port_t i2c_port);
+esp_err_t aht_init(gpio_num_t sda_gpio, gpio_num_t scl_gpio, i2c_port_t i2c_port);
 
 /**
  * @brief Read temperature and humidity values from AHT20
