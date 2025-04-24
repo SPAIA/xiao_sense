@@ -20,6 +20,7 @@
 #include "sdcard_interface.h"
 #include "upload_manager.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 
 static const char TAG[] = "cam_mgr";
 
@@ -57,6 +58,24 @@ static inline void sensor_gate(bool on)
 static inline void sensor_gate(bool on) { (void)on; }
 #endif
 
+typedef struct
+{
+    int64_t hit;      // A
+    int64_t hi_ready; // B
+    int64_t fb_ok;    // C
+    int64_t file_ok;  // D
+} cam_profile_t;
+
+static inline void log_profile(const cam_profile_t *p)
+{
+    ESP_LOGI(TAG,
+             "LAG  total=%llu ms (setup=%llu + capture=%llu + sd=%llu)",
+             (p->file_ok - p->hit) / 1000,
+             (p->hi_ready - p->hit) / 1000,
+             (p->fb_ok - p->hi_ready) / 1000,
+             (p->file_ok - p->fb_ok) / 1000);
+}
+
 void log_heap_stats(const char *label)
 {
     multi_heap_info_t info;
@@ -71,7 +90,7 @@ void log_heap_stats(const char *label)
 static esp_err_t reinit_camera(const camera_config_t *cfg)
 {
     esp_camera_deinit();
-    vTaskDelay(pdMS_TO_TICKS(50)); // Allow power stabilization
+    vTaskDelay(pdMS_TO_TICKS(5)); // Allow power stabilization
 
     // Retry with exponential backoff
     for (int retry = 0; retry < 3; retry++)
@@ -170,6 +189,9 @@ esp_err_t camera_manager_init(void)
 
 bool camera_manager_motion_loop(float thresh, time_t *stamp)
 {
+    cam_profile_t prof = {0};
+    prof.hit = esp_timer_get_time();
+
     if (xSemaphoreTake(cam_mux, 0) != pdTRUE)
         return false;
     sensor_gate(true);
@@ -185,53 +207,76 @@ bool camera_manager_motion_loop(float thresh, time_t *stamp)
     return hit;
 }
 
-esp_err_t camera_manager_capture(time_t ts)
+esp_err_t camera_manager_capture(time_t ts, cam_profile_t *prof)
 {
+    esp_err_t rc = ESP_FAIL; // pessimistic default
+    camera_fb_t *fb = NULL;  // frame-buffer handle
+    FILE *file = NULL;
+    char path[64];
+
+    /* ─── 1.  Enter critical section ─────────────────────────────── */
     if (xSemaphoreTake(cam_mux, portMAX_DELAY) != pdTRUE)
-        return ESP_FAIL;
+    {
+        return ESP_ERR_TIMEOUT; // should never happen
+    }
     sensor_gate(true);
 
-    // switch to high‑res JPEG
-    if (reinit_camera(&cfg_high) != ESP_OK)
-        goto fail;
+    /* ─── 2.  Switch to high-res mode ────────────────────────────── */
+    rc = reinit_camera(&cfg_high);
+    if (rc != ESP_OK)
+        goto cleanup;
 
-    camera_fb_t *fb = esp_camera_fb_get();
+    prof->hi_ready = esp_timer_get_time();
+
+    /* ─── 3.  Grab a frame ───────────────────────────────────────── */
+    fb = esp_camera_fb_get();
     if (!fb)
-        goto fail;
+    {
+        rc = ESP_ERR_NO_MEM; // driver returns NULL on OOM
+        goto cleanup;
+    }
+    prof->fb_ok = esp_timer_get_time();
+    /* ─── 4.  Open destination file ──────────────────────────────── */
+    snprintf(path, sizeof(path), "%s/spaia/%lld.jpg",
+             MOUNT_POINT, (long long)ts);
+    file = fopen(path, "wb");
+    if (!file)
+    {
+        rc = ESP_ERR_NOT_FOUND; // SD card removed / FS full
+        goto cleanup;
+    }
 
-    char path[64];
-    snprintf(path, sizeof(path), "%s/spaia/%lld.jpg", MOUNT_POINT, (long long)ts);
-    FILE *f = fopen(path, "wb");
-    if (!f)
+    /* ─── 5.  Write JPEG to SD card ──────────────────────────────── */
+    if (fwrite(fb->buf, 1, fb->len, file) != fb->len)
     {
-        esp_camera_fb_return(fb);
-        goto fail;
+        ESP_LOGE(TAG, "SD-write failed");
+        rc = ESP_FAIL;
+        goto cleanup;
     }
-    size_t written = fwrite(fb->buf, 1, fb->len, f);
-    if (written != fb->len)
-    {
-        ESP_LOGE(TAG, "Write failed: %d/%d bytes", written, fb->len);
-        fclose(f);
-        remove(path); // Optional: Clean up partial file
-        esp_camera_fb_return(fb);
-        goto fail;
-    }
-    fclose(f);
+    fclose(file);
+    file = NULL; // mark as closed
     upload_manager_notify_new_file(path);
-    esp_camera_fb_return(fb);
+    rc = ESP_OK; // success!
 
-    // return to low‑res motion mode
+cleanup:
+    /* ─── 6.  Common cleanup & mode rollback ─────────────────────── */
+    if (file)
+    {
+        fclose(file);
+        prof->file_ok = esp_timer_get_time(); // ── D
+        /* remove partial file on error */
+        if (rc != ESP_OK)
+            remove(path);
+    }
+    if (fb)
+        esp_camera_fb_return(fb);
+
+    /* always restore low-res mode and power state */
     reinit_camera(&cfg_low);
     sensor_gate(false);
-    xSemaphoreGive(cam_mux);
-    return ESP_OK;
 
-fail:
-    ESP_LOGE(TAG, "capture failed");
-    reinit_camera(&cfg_low);
-    sensor_gate(false);
-    xSemaphoreGive(cam_mux);
-    return ESP_FAIL;
+    xSemaphoreGive(cam_mux); // **always** release mutex
+    return rc;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -243,10 +288,19 @@ static void camera_worker_task(void *pv)
     time_t ts;
     for (;;)
     {
+        cam_profile_t prof = {0};
+        prof.hit = esp_timer_get_time(); // A: time of motion detection
+
         if (camera_manager_motion_loop(MOTION_THRESHOLD, &ts))
         {
             ESP_LOGI(TAG, "motion → capture");
-            camera_manager_capture(ts);
+            camera_manager_capture(ts, &prof);
+
+            // Ensure final timestamp is recorded even on error
+            if (prof.file_ok == 0)
+                prof.file_ok = esp_timer_get_time(); // fallback
+
+            log_profile(&prof); // <── see the lag breakdown
             vTaskDelay(pdMS_TO_TICKS(POST_SHOT_DELAY));
         }
         vTaskDelay(pdMS_TO_TICKS(MOTION_LOOP_DELAY));

@@ -127,3 +127,8 @@ Common issues and solutions are documented in the component guides. For general 
 ## License
 
 [Add license information here]
+
+Applied a patch to the camera from here:
+https://github.com/remibert/pycameresp/blob/main/patch/S3/c/esp32-camera/driver/cam_hal.c
+This keeps memory allocated between de-init's to help prevent heap fragmentation.
+
