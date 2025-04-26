@@ -1,8 +1,7 @@
 ## IDF Component Manager Manifest File
 dependencies:
   idf: ">=5.0"
-  espressif/esp32-camera:
-    override_path: "../components/esp32-camera"
+  espressif/esp32-camera: "*"
   # # Put list of dependencies here
   # # For components maintained by Espressif:
   # component: "~1.0.0"

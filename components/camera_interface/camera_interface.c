@@ -156,15 +156,9 @@ static void build_configs(void)
 
     // Low‑res motion config
     cfg_low.xclk_freq_hz = 10000000; // slower clock saves power
-    cfg_low.pixel_format = PIXFORMAT_GRAYSCALE;
-    cfg_low.frame_size = FRAMESIZE_QVGA; // 320×240
+    cfg_low.pixel_format = PIXFORMAT_RGB565;
+    cfg_low.frame_size = FRAMESIZE_SVGA; // 320×240
     cfg_low.jpeg_quality = 0;            // ignored
-
-    // High‑res capture config
-    cfg_high.xclk_freq_hz = 20000000; // full speed
-    cfg_high.pixel_format = PIXFORMAT_JPEG;
-    cfg_high.frame_size = FRAMESIZE_SVGA; // 1280×1024
-    cfg_high.jpeg_quality = 15;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -178,9 +172,13 @@ esp_err_t camera_manager_init(void)
         return ESP_ERR_NO_MEM;
 
     build_configs();
-
-    if (reinit_camera(&cfg_low) != ESP_OK)
-        return ESP_FAIL;
+    log_heap_stats("Before cam init");
+    esp_err_t err = esp_camera_init(&cfg_low);
+    log_heap_stats("After cam init");
+    if (err != ESP_OK)
+    {
+        return err;
+    }
 
     // Initialise background model for motion detection (QVGA dims)
     initialize_background_model(320, 240);
@@ -209,76 +207,189 @@ bool camera_manager_motion_loop(float thresh, time_t *stamp)
 
 esp_err_t camera_manager_capture(time_t ts, cam_profile_t *prof)
 {
-    esp_err_t rc = ESP_FAIL; // pessimistic default
-    camera_fb_t *fb = NULL;  // frame-buffer handle
-    FILE *file = NULL;
-    char path[64];
+    if (!prof)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
 
-    /* ─── 1.  Enter critical section ─────────────────────────────── */
+    // Log heap before capture to diagnose memory issues
+    log_heap_stats("Before capture");
+
+    esp_err_t rc = ESP_FAIL;
+    camera_fb_t *fb = NULL;
+    FILE *file = NULL;
+    char path[64] = {0};
+    uint8_t *jpg_buf = NULL;
+    size_t jpg_len = 0;
+    bool jpg_converted = false;
+
+    /* ─── 1. Enter critical section ─────────────────────────────── */
     if (xSemaphoreTake(cam_mux, portMAX_DELAY) != pdTRUE)
     {
-        return ESP_ERR_TIMEOUT; // should never happen
+        return ESP_ERR_TIMEOUT;
     }
     sensor_gate(true);
 
-    /* ─── 2.  Switch to high-res mode ────────────────────────────── */
-    rc = reinit_camera(&cfg_high);
-    if (rc != ESP_OK)
+    /* ─── 2. Switch to high-res mode ────────────────────────────── */
+    sensor = esp_camera_sensor_get();
+    if (!sensor)
+    {
+        ESP_LOGE(TAG, "Failed to get sensor handle");
+        rc = ESP_ERR_NOT_FOUND;
         goto cleanup;
+    }
 
+    // Direct mode switch without reinit
+    sensor->set_framesize(sensor, FRAMESIZE_SXGA);   // High-res
+    sensor->set_quality(sensor, 10);                 // Lower is better quality (0-63)
+    sensor->set_gainceiling(sensor, GAINCEILING_4X); // Adjust gain for better image
+
+    // Small delay to let sensor registers update
+    vTaskDelay(pdMS_TO_TICKS(20));
     prof->hi_ready = esp_timer_get_time();
 
-    /* ─── 3.  Grab a frame ───────────────────────────────────────── */
+    /* ─── 3. Grab a frame ───────────────────────────────────────── */
+    // Clear frame buffer before capture
+    esp_camera_fb_return(NULL); // Flush any pending frames
+
+    // Take multiple frames to ensure buffer is fresh
+    camera_fb_t *dummy = esp_camera_fb_get();
+    if (dummy)
+    {
+        esp_camera_fb_return(dummy); // Discard first frame which may be corrupted
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
     fb = esp_camera_fb_get();
     if (!fb)
     {
-        rc = ESP_ERR_NO_MEM; // driver returns NULL on OOM
+        ESP_LOGE(TAG, "Camera capture failed");
+        rc = ESP_ERR_NO_MEM;
         goto cleanup;
     }
     prof->fb_ok = esp_timer_get_time();
-    /* ─── 4.  Open destination file ──────────────────────────────── */
-    snprintf(path, sizeof(path), "%s/spaia/%lld.jpg",
-             MOUNT_POINT, (long long)ts);
+
+    /* ─── 4. Handle JPEG conversion if needed ────────────────────── */
+    if (fb->format == PIXFORMAT_JPEG)
+    {
+        jpg_buf = fb->buf;
+        jpg_len = fb->len;
+        ESP_LOGI(TAG, "Using direct JPEG from camera: %d bytes", jpg_len);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Converting to JPEG from format %d", fb->format);
+        // Try using a higher quality for better results - 95 instead of 80
+        if (!frame2jpg(fb, 95 /*quality*/, &jpg_buf, &jpg_len))
+        {
+            ESP_LOGE(TAG, "JPEG conversion failed");
+            rc = ESP_FAIL;
+            goto cleanup;
+        }
+        jpg_converted = true;
+        ESP_LOGI(TAG, "JPEG conversion successful: %d bytes", jpg_len);
+    }
+
+    /* ─── 5. Save to SD card ──────────────────────────────────── */
+    snprintf(path, sizeof(path), "%s/spaia/%lld.jpg", MOUNT_POINT, (long long)ts);
     file = fopen(path, "wb");
     if (!file)
     {
-        rc = ESP_ERR_NOT_FOUND; // SD card removed / FS full
+        ESP_LOGE(TAG, "Failed to open file: %s", path);
+        rc = ESP_ERR_NOT_FOUND;
         goto cleanup;
     }
 
-    /* ─── 5.  Write JPEG to SD card ──────────────────────────────── */
-    if (fwrite(fb->buf, 1, fb->len, file) != fb->len)
+    // Add JPEG header validation and correction if needed
+    if (jpg_len < 2 || jpg_buf[0] != 0xFF || jpg_buf[1] != 0xD8)
     {
-        ESP_LOGE(TAG, "SD-write failed");
+        ESP_LOGW(TAG, "Invalid JPEG data - missing SOI marker, attempting recovery");
+
+        // Try to locate a valid JPEG header in the buffer
+        bool found_header = false;
+        for (size_t i = 0; i < jpg_len - 1; i++)
+        {
+            if (jpg_buf[i] == 0xFF && jpg_buf[i + 1] == 0xD8)
+            {
+                ESP_LOGI(TAG, "Found valid JPEG header at offset %d", i);
+                jpg_buf += i;
+                jpg_len -= i;
+                found_header = true;
+                break;
+            }
+        }
+
+        if (!found_header)
+        {
+            ESP_LOGE(TAG, "Could not find valid JPEG header");
+            rc = ESP_FAIL;
+            goto cleanup;
+        }
+    }
+
+    // Check for valid JPEG trailer
+    if (jpg_len < 2 || jpg_buf[jpg_len - 2] != 0xFF || jpg_buf[jpg_len - 1] != 0xD9)
+    {
+        ESP_LOGW(TAG, "JPEG may be missing EOI marker");
+    }
+
+    ESP_LOGI(TAG, "Writing %d bytes to file", jpg_len);
+    size_t written = fwrite(jpg_buf, 1, jpg_len, file);
+    if (written != jpg_len)
+    {
+        ESP_LOGE(TAG, "SD write failed: wrote %d of %d bytes", written, jpg_len);
         rc = ESP_FAIL;
         goto cleanup;
     }
+
+    // Ensure data is flushed to disk
+    fflush(file);
+
     fclose(file);
-    file = NULL; // mark as closed
+    file = NULL;
+
     upload_manager_notify_new_file(path);
-    rc = ESP_OK; // success!
+    prof->file_ok = esp_timer_get_time();
+    rc = ESP_OK;
 
 cleanup:
-    /* ─── 6.  Common cleanup & mode rollback ─────────────────────── */
+    /* ─── 6. Cleanup resources ─────────────────────────────────── */
     if (file)
     {
         fclose(file);
-        prof->file_ok = esp_timer_get_time(); // ── D
-        /* remove partial file on error */
         if (rc != ESP_OK)
+        {
             remove(path);
+        }
     }
-    if (fb)
-        esp_camera_fb_return(fb);
 
-    /* always restore low-res mode and power state */
-    reinit_camera(&cfg_low);
+    if (jpg_converted && jpg_buf)
+    {
+        free(jpg_buf);
+    }
+
+    if (fb)
+    {
+        esp_camera_fb_return(fb);
+    }
+
+    // Restore low-res mode without reinit
+    if (sensor)
+    {
+        sensor->set_framesize(sensor, FRAMESIZE_QVGA);
+        sensor->set_quality(sensor, 30); // Can be lower quality for motion detection
+    }
     sensor_gate(false);
 
-    xSemaphoreGive(cam_mux); // **always** release mutex
+    // Always ensure timing is captured
+    if (prof->file_ok == 0)
+    {
+        prof->file_ok = esp_timer_get_time();
+    }
+
+    xSemaphoreGive(cam_mux);
     return rc;
 }
-
 // ──────────────────────────────────────────────────────────────────────────────
 // Background task – replacement for old motion_detection_task/createCameraTask
 // ──────────────────────────────────────────────────────────────────────────────

@@ -9,12 +9,20 @@
 
 static const char *detectorTag = "detector";
 
+// Configuration parameters
 #define ALPHA 0.06f         // lower numbers respond to quicker movements, higher numbers reduce noise sensitivity
 #define FRAME_INIT_COUNT 20 // Number of frames to capture before starting motion detection
-
 #define MAX_COMPONENTS 30
-#define NEIGHBORHOOD 1 // defines 8-connected neighborhood
+#define NEIGHBORHOOD 1         // defines 8-connected neighborhood
+#define MIN_COMPONENT_PIXELS 5 // Minimum pixel count for a valid component
+#define MAX_BOX_AREA 10000     // Maximum area for a valid bounding box
+#define MIN_BOX_AREA 200       // Minimum area for a valid bounding box
+#define IOU_THRESHOLD 0.3      // Threshold for IoU-based box merging
 
+// External queue for sensor data
+extern QueueHandle_t sensor_data_queue;
+
+// Type definitions
 typedef struct
 {
     int label;
@@ -28,10 +36,24 @@ typedef struct
     size_t x_max, y_max;
 } BoundingBox;
 
+// Global variables
 BackgroundModel bg_model = {NULL, 0, 0, false};
-
 static int frame_counter = 0; // Frame counter for initialization
 
+// Utility function to convert RGB565 to grayscale
+static inline uint8_t rgb565_to_gray(uint16_t p)
+{
+    uint8_t r = (p >> 11) & 0x1F; // 5 bits
+    uint8_t g = (p >> 5) & 0x3F;  // 6 bits
+    uint8_t b = p & 0x1F;         // 5 bits
+    // Expand to 8-bit range and apply integer-only BT.601 weights
+    r <<= 3;
+    g <<= 2;
+    b <<= 3;
+    return (r * 30 + g * 59 + b * 11) / 100; // ≈Y'
+}
+
+// Initialize background model
 void initialize_background_model(size_t width, size_t height)
 {
     if (bg_model.background)
@@ -39,14 +61,29 @@ void initialize_background_model(size_t width, size_t height)
         free(bg_model.background);
     }
     bg_model.background = (uint8_t *)malloc(width * height);
+    if (!bg_model.background)
+    {
+        ESP_LOGE(detectorTag, "Failed to allocate memory for background model");
+        return;
+    }
+
     bg_model.width = width;
     bg_model.height = height;
     bg_model.initialized = false;
     frame_counter = 0;
+
+    ESP_LOGI(detectorTag, "Background model initialized with dimensions %dx%d", width, height);
 }
 
+// Update background model with new frame
 void update_background_model(camera_fb_t *frame)
 {
+    if (!frame)
+    {
+        ESP_LOGE(detectorTag, "Invalid frame provided to update_background_model");
+        return;
+    }
+
     if (!bg_model.background || bg_model.width != frame->width || bg_model.height != frame->height)
     {
         initialize_background_model(frame->width, frame->height);
@@ -54,7 +91,15 @@ void update_background_model(camera_fb_t *frame)
 
     if (frame_counter < FRAME_INIT_COUNT)
     {
-        memcpy(bg_model.background, frame->buf, frame->len);
+        // During initialization, just copy the frame data
+        uint16_t *pix = (uint16_t *)frame->buf;
+        size_t pixels = frame->width * frame->height;
+
+        for (size_t p = 0; p < pixels; p++)
+        {
+            bg_model.background[p] = rgb565_to_gray(pix[p]);
+        }
+
         frame_counter++; // Increment counter with each frame
         if (frame_counter >= FRAME_INIT_COUNT)
         {
@@ -63,12 +108,19 @@ void update_background_model(camera_fb_t *frame)
         }
         return; // Skip background update and motion detection until initialized
     }
-    for (size_t i = 0; i < frame->len; i++)
+
+    // Update the background model using running average
+    size_t pixels = frame->width * frame->height;
+    uint16_t *pix = (uint16_t *)frame->buf;
+
+    for (size_t p = 0; p < pixels; p++)
     {
+        uint8_t cur = rgb565_to_gray(pix[p]);
         // Adjust ALPHA if the background update is too fast or slow
-        bg_model.background[i] = (uint8_t)((1 - ALPHA) * bg_model.background[i] + ALPHA * frame->buf[i]);
+        bg_model.background[p] = (uint8_t)((1 - ALPHA) * bg_model.background[p] + ALPHA * cur);
     }
 }
+
 // Calculate the intersection area of two boxes
 size_t calculate_intersection(BoundingBox box1, BoundingBox box2)
 {
@@ -97,7 +149,7 @@ size_t calculate_union(BoundingBox box1, BoundingBox box2)
     return area1 + area2 - intersection_area;
 }
 
-// Calculate IoU
+// Calculate IoU (Intersection over Union)
 float calculate_iou(BoundingBox box1, BoundingBox box2)
 {
     size_t intersection = calculate_intersection(box1, box2);
@@ -110,7 +162,8 @@ float calculate_iou(BoundingBox box1, BoundingBox box2)
 
     return (float)intersection / union_area;
 }
-// Merge two bounding boxes into one by combining their coordinates
+
+// Merge two bounding boxes into one
 BoundingBox merge_boxes(BoundingBox box1, BoundingBox box2)
 {
     BoundingBox merged = {
@@ -120,7 +173,8 @@ BoundingBox merge_boxes(BoundingBox box1, BoundingBox box2)
         .y_max = (box1.y_max > box2.y_max) ? box1.y_max : box2.y_max};
     return merged;
 }
-// Filter out boxes that are too large (based on area)
+
+// Filter out boxes that are too large
 void filter_large_boxes(BoundingBox *boxes, size_t *box_count, size_t max_area)
 {
     size_t i = 0;
@@ -142,7 +196,55 @@ void filter_large_boxes(BoundingBox *boxes, size_t *box_count, size_t max_area)
         }
     }
 }
-// Filter overlapping boxes based on IoU threshold and merge them
+
+// Filter out boxes that are too small
+void filter_small_boxes(BoundingBox *boxes, size_t *box_count, size_t min_area)
+{
+    size_t i = 0;
+    while (i < *box_count)
+    {
+        size_t area = (boxes[i].x_max - boxes[i].x_min) * (boxes[i].y_max - boxes[i].y_min);
+        if (area < min_area)
+        {
+            // Remove small box
+            for (size_t j = i; j < *box_count - 1; j++)
+            {
+                boxes[j] = boxes[j + 1];
+            }
+            (*box_count)--;
+        }
+        else
+        {
+            i++;
+        }
+    }
+}
+
+// Filter boxes that touch frame edges
+void filter_edge_touching_boxes(BoundingBox *boxes, size_t *box_count, size_t frame_width, size_t frame_height)
+{
+    size_t i = 0;
+    while (i < *box_count)
+    {
+        // Check if the box touches any edge
+        if (boxes[i].x_min == 0 || boxes[i].y_min == 0 ||
+            boxes[i].x_max == frame_width - 1 || boxes[i].y_max == frame_height - 1)
+        {
+            // Remove this box by shifting all subsequent boxes
+            for (size_t j = i; j < *box_count - 1; j++)
+            {
+                boxes[j] = boxes[j + 1];
+            }
+            (*box_count)--; // Decrease the count of boxes
+        }
+        else
+        {
+            i++; // Move to next box only if current box was not removed
+        }
+    }
+}
+
+// Filter and merge overlapping boxes
 void filter_and_merge_boxes(BoundingBox *boxes, size_t *box_count, float iou_threshold, size_t max_area)
 {
     // First, filter out large boxes
@@ -171,78 +273,15 @@ void filter_and_merge_boxes(BoundingBox *boxes, size_t *box_count, float iou_thr
     }
 }
 
-// Filter overlapping boxes based on IoU threshold
-void filter_boxes_by_iou(BoundingBox *boxes, size_t *box_count, float iou_threshold)
-{
-    for (size_t i = 0; i < *box_count; i++)
-    {
-        for (size_t j = i + 1; j < *box_count; j++)
-        {
-            if (calculate_iou(boxes[i], boxes[j]) > iou_threshold)
-            {
-                // Merge boxes or discard the duplicate one
-                // For simplicity, let's just discard the second box for now
-                // You can choose to merge the boxes if necessary
-                for (size_t k = j; k < *box_count - 1; k++)
-                {
-                    boxes[k] = boxes[k + 1];
-                }
-                (*box_count)--; // Reduce the count
-                j--;            // Recheck the current index
-            }
-        }
-    }
-}
-
+// Optional: Log bounding box for debugging
 void draw_bounding_box(camera_fb_t *frame, BoundingBox box)
 {
-    // Draw a box around the object on the frame
-    // For simplicity, this is a placeholder as rendering depends on your display library
-    ESP_LOGI(detectorTag, "Bounding Box - x_min: %d, y_min: %d, x_max: %d, y_max: %d", box.x_min, box.y_min, box.x_max, box.y_max);
+    // This is a placeholder for actual drawing logic
+    ESP_LOGI(detectorTag, "Bounding Box - x_min: %zu, y_min: %zu, x_max: %zu, y_max: %zu",
+             box.x_min, box.y_min, box.x_max, box.y_max);
 }
-void filter_small_boxes(BoundingBox *boxes, size_t *box_count, size_t min_area)
-{
-    size_t i = 0;
-    while (i < *box_count)
-    {
-        size_t area = (boxes[i].x_max - boxes[i].x_min) * (boxes[i].y_max - boxes[i].y_min);
-        if (area < min_area)
-        {
-            // Remove small box
-            for (size_t j = i; j < *box_count - 1; j++)
-            {
-                boxes[j] = boxes[j + 1];
-            }
-            (*box_count)--;
-        }
-        else
-        {
-            i++;
-        }
-    }
-}
-void filter_edge_touching_boxes(BoundingBox *boxes, size_t *box_count, size_t frame_width, size_t frame_height)
-{
-    size_t i = 0;
-    while (i < *box_count)
-    {
-        // Check if the box touches any edge
-        if (boxes[i].x_min == 0 || boxes[i].y_min == 0 ||
-            boxes[i].x_max == frame_width - 1 || boxes[i].y_max == frame_height - 1)
-        {
-            // Remove this box by shifting all subsequent boxes
-            for (size_t j = i; j < *box_count - 1; j++)
-            {
-                boxes[j] = boxes[j + 1];
-            }
-            (*box_count)--; // Decrease the count of boxes
-        }
-        else
-        {
-            i++; // Move to next box only if current box was not removed
-        }
-    }
-}
+
+// Convert bounding boxes to JSON string
 char *boxes_to_json(BoundingBox *boxes, size_t box_count)
 {
     if (box_count == 0 || boxes == NULL)
@@ -254,7 +293,7 @@ char *boxes_to_json(BoundingBox *boxes, size_t box_count)
     char *json_string = (char *)malloc(estimated_size);
     if (json_string == NULL)
     {
-        ESP_LOGE("boxes_to_json", "Failed to allocate memory for JSON string");
+        ESP_LOGE(detectorTag, "Failed to allocate memory for JSON string");
         return NULL;
     }
 
@@ -275,13 +314,13 @@ char *boxes_to_json(BoundingBox *boxes, size_t box_count)
 
         if (written >= remaining_size)
         {
-            // We’re out of space; double size with reallocation
+            // We're out of space; double size with reallocation
             size_t current_length = current_position - json_string;
             estimated_size *= 2;
             char *new_string = (char *)realloc(json_string, estimated_size);
             if (new_string == NULL)
             {
-                ESP_LOGE("boxes_to_json", "Failed to reallocate memory for JSON string");
+                ESP_LOGE(detectorTag, "Failed to reallocate memory for JSON string");
                 free(json_string);
                 return NULL;
             }
@@ -298,7 +337,7 @@ char *boxes_to_json(BoundingBox *boxes, size_t box_count)
         current_position += written;
         remaining_size -= written;
 
-        // Add a comma if it’s not the last box
+        // Add a comma if it's not the last box
         if (i < box_count - 1)
         {
             written = snprintf(current_position, remaining_size, ",");
@@ -308,49 +347,75 @@ char *boxes_to_json(BoundingBox *boxes, size_t box_count)
     }
 
     // Close the JSON array
-    snprintf(current_position, remaining_size, "]");
+    written = snprintf(current_position, remaining_size, "]");
+    current_position += written;
 
     // Optional: Trim memory to actual size
-    size_t final_size = current_position - json_string + 1; // +1 for null terminator
+    size_t final_size = (current_position - json_string) + 1; // +1 for null terminator
     char *final_json = (char *)realloc(json_string, final_size);
     return final_json ? final_json : json_string; // Return final allocation or original
 }
 
+// Main motion detection function
 bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detection_timestamp)
 {
-    // Declare local variables
-    size_t max_boxes = 30;
-    size_t box_count = 0;
-    size_t max_area = 10000; // the max size of a valid box
-    size_t min_area = 200;
-    float iou_threshold = 0.3;
-    BoundingBox *boxes = (BoundingBox *)malloc(max_boxes * sizeof(BoundingBox));
+    if (!current_frame)
+    {
+        ESP_LOGE(detectorTag, "Null frame provided to detect_motion");
+        return false;
+    }
 
-    if (!current_frame || !bg_model.background || bg_model.width != current_frame->width || bg_model.height != current_frame->height)
+    if (!bg_model.background || bg_model.width != current_frame->width || bg_model.height != current_frame->height)
     {
         ESP_LOGD(detectorTag, "Frame error or background model not initialized");
         return false;
     }
-    // Update the background model
+
+    // Update the background model first
     update_background_model(current_frame);
 
+    // Skip detection if background model is not fully initialized
     if (!bg_model.initialized)
     {
-        free(boxes); // Free the allocated memory before returning
+        return false;
+    }
+
+    // Declare local variables
+    size_t max_boxes = 30;
+    size_t box_count = 0;
+    BoundingBox *boxes = (BoundingBox *)malloc(max_boxes * sizeof(BoundingBox));
+    if (!boxes)
+    {
+        ESP_LOGE(detectorTag, "Failed to allocate memory for bounding boxes");
+        return false;
+    }
+
+    // Allocate memory for tracking changed pixels
+    size_t *pixel_x = (size_t *)malloc(current_frame->width * current_frame->height * sizeof(size_t));
+    size_t *pixel_y = (size_t *)malloc(current_frame->width * current_frame->height * sizeof(size_t));
+
+    if (!pixel_x || !pixel_y)
+    {
+        ESP_LOGE(detectorTag, "Failed to allocate memory for pixel tracking");
+        free(boxes);
+        if (pixel_x)
+            free(pixel_x);
+        if (pixel_y)
+            free(pixel_y);
         return false;
     }
 
     int changed_pixels = 0;
-    size_t *pixel_x = (size_t *)malloc(current_frame->len * sizeof(size_t));
-    size_t *pixel_y = (size_t *)malloc(current_frame->len * sizeof(size_t));
-
     size_t width = current_frame->width;
     size_t height = current_frame->height;
+    size_t pixels = width * height;
+    uint16_t *pix = (uint16_t *)current_frame->buf;
 
     // Track positions of changed pixels
-    for (size_t i = 0; i < current_frame->len; i++)
+    for (size_t i = 0; i < pixels; i++)
     {
-        if (abs(bg_model.background[i] - current_frame->buf[i]) > threshold)
+        uint8_t cur = rgb565_to_gray(pix[i]);
+        if (abs(bg_model.background[i] - cur) > threshold)
         {
             changed_pixels++;
             size_t x = i % width;
@@ -359,30 +424,73 @@ bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detectio
             pixel_y[changed_pixels - 1] = y;
         }
     }
-    // Create bounding boxes from clusters of changed pixels
-    // --- Connected-Component Labeling (CCL) Implementation ---
 
+    // Early exit if very few pixels changed
+    if (changed_pixels < MIN_COMPONENT_PIXELS)
+    {
+        free(boxes);
+        free(pixel_x);
+        free(pixel_y);
+        return false;
+    }
+
+    // Create bounding boxes from clusters of changed pixels using Connected-Component Labeling
     int *labels = (int *)calloc(width * height, sizeof(int));
-    Component components[MAX_COMPONENTS];
+    if (!labels)
+    {
+        ESP_LOGE(detectorTag, "Failed to allocate memory for CCL labels");
+        free(boxes);
+        free(pixel_x);
+        free(pixel_y);
+        return false;
+    }
+
+    Component components[MAX_COMPONENTS] = {0};
     int next_label = 1;
 
+    // Process each changed pixel
     for (size_t i = 0; i < changed_pixels; i++)
     {
         size_t x = pixel_x[i];
         size_t y = pixel_y[i];
         size_t idx = y * width + x;
 
+        // Skip if this pixel is already labeled
         if (labels[idx] != 0)
-            continue; // Already labeled
+            continue;
 
+        // Skip if we've reached component limit
         if (next_label >= MAX_COMPONENTS)
             break;
 
-        Component comp = {.label = next_label, .x_min = x, .y_min = y, .x_max = x, .y_max = y, .pixel_count = 0};
+        // Initialize new component
+        Component comp = {
+            .label = next_label,
+            .x_min = x,
+            .y_min = y,
+            .x_max = x,
+            .y_max = y,
+            .pixel_count = 0};
 
+        // BFS to find connected pixels in this component
         size_t queue_capacity = width * height;
         size_t *queue_x = (size_t *)malloc(queue_capacity * sizeof(size_t));
         size_t *queue_y = (size_t *)malloc(queue_capacity * sizeof(size_t));
+
+        if (!queue_x || !queue_y)
+        {
+            ESP_LOGE(detectorTag, "Failed to allocate memory for BFS queue");
+            free(labels);
+            free(boxes);
+            free(pixel_x);
+            free(pixel_y);
+            if (queue_x)
+                free(queue_x);
+            if (queue_y)
+                free(queue_y);
+            return false;
+        }
+
         size_t q_start = 0, q_end = 0;
 
         queue_x[q_end] = x;
@@ -405,6 +513,7 @@ bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detectio
             if (cy > comp.y_max)
                 comp.y_max = cy;
 
+            // Check 8-connected neighborhood
             for (int dy = -NEIGHBORHOOD; dy <= NEIGHBORHOOD; dy++)
             {
                 for (int dx = -NEIGHBORHOOD; dx <= NEIGHBORHOOD; dx++)
@@ -415,12 +524,15 @@ bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detectio
                     int nx = (int)cx + dx;
                     int ny = (int)cy + dy;
 
+                    // Skip out-of-bounds pixels
                     if (nx < 0 || ny < 0 || nx >= width || ny >= height)
                         continue;
 
                     size_t nidx = ny * width + nx;
 
-                    bool neighbor_changed = abs(bg_model.background[nidx] - current_frame->buf[nidx]) > threshold;
+                    // Check if this neighboring pixel is also changed
+                    uint8_t neighbor_cur = rgb565_to_gray(pix[nidx]);
+                    bool neighbor_changed = abs(bg_model.background[nidx] - neighbor_cur) > threshold;
 
                     if (neighbor_changed && labels[nidx] == 0)
                     {
@@ -433,7 +545,7 @@ bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detectio
         }
 
         // Filter out small components immediately (noise)
-        if (comp.pixel_count >= 5)
+        if (comp.pixel_count >= MIN_COMPONENT_PIXELS)
         {
             components[next_label - 1] = comp;
             next_label++;
@@ -463,34 +575,33 @@ bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detectio
     }
 
     free(labels);
-    // --- End of CCL Implementation ---
-
     free(pixel_x);
     free(pixel_y);
 
+    // Apply filtering to bounding boxes
     if (box_count > 0)
     {
-        // ESP_LOGI(detectorTag, "unfiltered boxes.: %zu", box_count);
-
-        // ESP_LOGI(detectorTag, "edge touching filtered out.: %zu", box_count);
-        // Filter and merge boxes based on IoU threshold and max_area
-        filter_and_merge_boxes(boxes, &box_count, iou_threshold, max_area);
-        filter_small_boxes(boxes, &box_count, min_area);
-        // ESP_LOGI(detectorTag, "small filtered out.: %zu", box_count);
+        // Apply various filters to refine the detection
+        filter_and_merge_boxes(boxes, &box_count, IOU_THRESHOLD, MAX_BOX_AREA);
+        filter_small_boxes(boxes, &box_count, MIN_BOX_AREA);
         filter_edge_touching_boxes(boxes, &box_count, width, height);
 
         // Check if there are still any boxes after filtering and merging
         if (box_count > 0)
         {
+            // Set detection timestamp if provided
             if (detection_timestamp != NULL)
             {
                 *detection_timestamp = time(NULL);
             }
-            ESP_LOGI(detectorTag, "Remaining boxes after filtering and merging: %zu", box_count);
+
+            ESP_LOGI(detectorTag, "Motion detected! Boxes after filtering: %zu", box_count);
+
+            // Generate JSON string for detected boxes
             char *json_string = boxes_to_json(boxes, box_count);
             if (json_string != NULL)
             {
-                // Create a complete sensor_data structure
+                // Create a sensor data structure for the queue
                 sensor_data_t sensor_data = {
                     .timestamp = time(NULL),
                     .temperature = 0, // These will be set elsewhere
@@ -499,28 +610,37 @@ bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detectio
                     .bboxes = json_string,
                     .owns_bboxes = true // This instance owns the memory
                 };
-                ESP_LOGI("detector", "JSON string length: %zu", strlen(json_string));
-                ESP_LOGI("detector", "JSON string: %s", json_string);
-                if (xQueueSend(sensor_data_queue, &sensor_data, pdMS_TO_TICKS(10)) != pdTRUE)
+
+                ESP_LOGI(detectorTag, "JSON string length: %zu", strlen(json_string));
+                ESP_LOGI(detectorTag, "JSON string: %s", json_string);
+
+                // Send to queue if available
+                if (sensor_data_queue != NULL)
                 {
-                    ESP_LOGE("detector", "Failed to send data to the queue");
-                    // Clean up if send fails
+                    if (xQueueSend(sensor_data_queue, &sensor_data, pdMS_TO_TICKS(10)) != pdTRUE)
+                    {
+                        ESP_LOGE(detectorTag, "Failed to send data to the queue");
+                        // Clean up if send fails
+                        free(json_string);
+                    }
+                }
+                else
+                {
+                    ESP_LOGE(detectorTag, "sensor_data_queue is NULL");
                     free(json_string);
                 }
-                // Don't free json_string here - it's now owned by the queue
+
+                free(boxes);
+                return true;
             }
-            return true;
         }
-        // else
-        // {
-        //     // If no boxes remain after filtering and merging, log and return false
-        //     ESP_LOGI(detectorTag, "No boxes remain after filtering and merging");
-        // }
     }
+
     free(boxes);  // Always free the memory used for the boxes
     return false; // Return false if no boxes are left
 }
 
+// Clean up resources
 void cleanup_background_model(void)
 {
     if (bg_model.background)
@@ -532,4 +652,6 @@ void cleanup_background_model(void)
     bg_model.height = 0;
     bg_model.initialized = false;
     frame_counter = 0; // Reset the frame counter when cleaning up
+
+    ESP_LOGI(detectorTag, "Background model resources cleaned up");
 }
