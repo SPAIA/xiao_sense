@@ -12,7 +12,7 @@
 
 // Using MAX_FILE_PATH from sdcard_interface.h
 #define MAX_URL_LENGTH 256
-#define QUEUE_SIZE 10
+#define QUEUE_SIZE 100
 
 #define MAX_FILE_SIZE (1024 * 1024) // 1MB max file size, adjust as needed
 
@@ -229,7 +229,7 @@ esp_err_t queue_file_upload(const char *filepath, const char *url)
     strncpy(request.filepath, filepath, MAX_FILE_PATH - 1);
     strncpy(request.url, url, MAX_URL_LENGTH - 1);
 
-    if (xQueueSend(upload_queue, &request, 0) != pdTRUE)
+    if (xQueueSend(upload_queue, &request, pdMS_TO_TICKS(200)) != pdTRUE)
     {
         ESP_LOGE(TAG, "Failed to queue upload request");
         return ESP_FAIL;

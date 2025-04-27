@@ -11,7 +11,16 @@
 #include "file_upload.h"
 #include "wifi_interface.h"
 
+// Function prototype declaration
+static inline uint32_t min_uint32(uint32_t a, uint32_t b);
+
 static const char *TAG = "upload_manager";
+
+// Function implementation
+static inline uint32_t min_uint32(uint32_t a, uint32_t b)
+{
+    return (a < b) ? a : b;
+}
 
 // Upload manager configuration
 typedef struct
@@ -22,6 +31,9 @@ typedef struct
     TaskHandle_t upload_task_handle; // Task handle for upload task
     EventGroupHandle_t event_group;  // Event group for signaling the task
     bool is_initialized;             // Initialization flag
+    uint8_t failed_attempts;         // Count of consecutive failed upload attempts
+    uint32_t max_backoff_ms;         // Maximum backoff time in milliseconds
+    uint32_t initial_backoff_ms;     // Initial backoff time in milliseconds
 } upload_manager_t;
 
 // Event bits for the event group
@@ -35,13 +47,16 @@ static upload_manager_t upload_manager = {
     .config_mutex = NULL,
     .upload_task_handle = NULL,
     .event_group = NULL,
-    .is_initialized = false};
+    .is_initialized = false,
+    .failed_attempts = 0,
+    .max_backoff_ms = 32000,     // 32 seconds max backoff
+    .initial_backoff_ms = 1000}; // 1 second initial backoff
 
 // Forward declarations
 static void upload_task(void *pvParameters);
 
-// Initialize the upload manager
-esp_err_t upload_manager_init(uint32_t upload_interval_seconds)
+// Initialize the upload manager with backoff configuration
+esp_err_t upload_manager_init_ex(uint32_t upload_interval_seconds, uint32_t initial_backoff_ms, uint32_t max_backoff_ms)
 {
     if (upload_manager.is_initialized)
     {
@@ -70,6 +85,9 @@ esp_err_t upload_manager_init(uint32_t upload_interval_seconds)
     // Set initial configuration
     upload_manager.upload_interval = upload_interval_seconds;
     upload_manager.last_upload_time = xTaskGetTickCount();
+    upload_manager.failed_attempts = 0;
+    upload_manager.initial_backoff_ms = initial_backoff_ms;
+    upload_manager.max_backoff_ms = max_backoff_ms;
 
     // Create upload task
     BaseType_t result = xTaskCreatePinnedToCore(
@@ -105,6 +123,14 @@ esp_err_t upload_manager_init(uint32_t upload_interval_seconds)
     }
 
     return ESP_OK;
+}
+
+// Initialize the upload manager with default backoff settings
+esp_err_t upload_manager_init(uint32_t upload_interval_seconds)
+{
+    return upload_manager_init_ex(upload_interval_seconds,
+                                  upload_manager.initial_backoff_ms,
+                                  upload_manager.max_backoff_ms);
 }
 
 // Set upload interval
@@ -321,12 +347,27 @@ static void upload_task(void *pvParameters)
             if (is_wifi_connected())
             {
                 ESP_LOGI(TAG, "Performing upload");
-                upload_all_files();
+                esp_err_t upload_result = upload_all_files();
 
-                // Update the last upload time
+                // Update the last upload time and reset backoff on success
                 if (xSemaphoreTake(upload_manager.config_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
                 {
-                    upload_manager.last_upload_time = xTaskGetTickCount();
+                    if (upload_result == ESP_OK)
+                    {
+                        upload_manager.last_upload_time = xTaskGetTickCount();
+                        upload_manager.failed_attempts = 0;
+                        ESP_LOGI(TAG, "Upload successful, reset backoff");
+                    }
+                    else
+                    {
+                        upload_manager.failed_attempts++;
+                        uint32_t backoff_time = upload_manager.initial_backoff_ms *
+                                                (1 << (upload_manager.failed_attempts - 1));
+                        backoff_time = min_uint32(backoff_time, upload_manager.max_backoff_ms);
+                        ESP_LOGE(TAG, "Upload failed (attempt %d), backing off for %lums",
+                                 upload_manager.failed_attempts, (unsigned long)backoff_time);
+                        vTaskDelay(pdMS_TO_TICKS(backoff_time));
+                    }
                     xSemaphoreGive(upload_manager.config_mutex);
                 }
 

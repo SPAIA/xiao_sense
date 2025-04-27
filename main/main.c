@@ -45,7 +45,7 @@ void start_tasks()
     {
         // WiFi already connected, start upload task immediately
         // Initialize upload manager first
-        upload_manager_init(0);
+        upload_manager_init(120);
         upload_folder();
         upload_task_started = true;
     }

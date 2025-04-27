@@ -27,9 +27,9 @@ static const char TAG[] = "cam_mgr";
 // ──────────────────────────────────────────────────────────────────────────────
 // Tunables
 // ──────────────────────────────────────────────────────────────────────────────
-#define MOTION_THRESHOLD 50.0f
-#define MOTION_LOOP_DELAY 150 // ms between motion checks
-#define POST_SHOT_DELAY 500   // ms after capture
+#define MOTION_THRESHOLD 40.0f
+#define MOTION_LOOP_DELAY 10 // ms between motion checks
+#define POST_SHOT_DELAY 5000 // ms after capture
 #define CAM_TASK_STACK 8192
 #define CAM_TASK_PRIO tskIDLE_PRIORITY
 #ifndef APP_CPU_NUM
@@ -40,10 +40,33 @@ static const char TAG[] = "cam_mgr";
 // Globals
 // ──────────────────────────────────────────────────────────────────────────────
 static SemaphoreHandle_t cam_mux; // protects esp_camera API
-static sensor_t *sensor = NULL;   // pointer refreshed after each init
 
-static camera_config_t cfg_low;  // QVGA grayscale
-static camera_config_t cfg_high; // SXGA jpeg
+static camera_config_t cfg = {
+    .pin_pwdn = PWDN_GPIO_NUM,
+    .pin_reset = RESET_GPIO_NUM,
+    .pin_xclk = XCLK_GPIO_NUM,
+    .pin_sccb_sda = SIOD_GPIO_NUM,
+    .pin_sccb_scl = SIOC_GPIO_NUM,
+    .pin_d7 = Y9_GPIO_NUM,
+    .pin_d6 = Y8_GPIO_NUM,
+    .pin_d5 = Y7_GPIO_NUM,
+    .pin_d4 = Y6_GPIO_NUM,
+    .pin_d3 = Y5_GPIO_NUM,
+    .pin_d2 = Y4_GPIO_NUM,
+    .pin_d1 = Y3_GPIO_NUM,
+    .pin_d0 = Y2_GPIO_NUM,
+    .pin_vsync = VSYNC_GPIO_NUM,
+    .pin_href = HREF_GPIO_NUM,
+    .pin_pclk = PCLK_GPIO_NUM,
+    .ledc_channel = LEDC_CHANNEL_0,
+    .ledc_timer = LEDC_TIMER_0,
+    .fb_count = 2,
+    .fb_location = CAMERA_FB_IN_PSRAM,
+    .xclk_freq_hz = 10000000, // slower clock saves power
+    .pixel_format = PIXFORMAT_YUV422,
+    .frame_size = FRAMESIZE_SVGA,
+    .jpeg_quality = 10 // ignored
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // ──────────────────────────────────────────────────────────────────────────────
@@ -66,6 +89,40 @@ typedef struct
     int64_t file_ok;  // D
 } cam_profile_t;
 
+// debug function to save the raw grayscale array as an image
+void save_grayscale_image(const uint8_t *gray_pixels, size_t width, size_t height, const char *filename)
+{
+    if (!gray_pixels || width == 0 || height == 0 || !filename)
+    {
+        ESP_LOGE(TAG, "Invalid arguments to save_grayscale_image");
+        return;
+    }
+
+    FILE *file = fopen(filename, "w");
+    if (!file)
+    {
+        ESP_LOGE(TAG, "Failed to open file: %s", filename);
+        return;
+    }
+
+    // Write PGM header
+    fprintf(file, "P2\n%zu %zu\n255\n", width, height);
+
+    // Write pixel values
+    for (size_t y = 0; y < height; y++)
+    {
+        for (size_t x = 0; x < width; x++)
+        {
+            fprintf(file, "%u ", gray_pixels[y * width + x]);
+        }
+        fprintf(file, "\n");
+    }
+
+    fclose(file);
+    ESP_LOGI(TAG, "Grayscale image saved: %s", filename);
+    upload_manager_notify_new_file(filename);
+}
+
 static inline void log_profile(const cam_profile_t *p)
 {
     ESP_LOGI(TAG,
@@ -85,310 +142,218 @@ void log_heap_stats(const char *label)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Re‑init wrapper (deinit + init). Must be called with cam_mux held.
-// ──────────────────────────────────────────────────────────────────────────────
-static esp_err_t reinit_camera(const camera_config_t *cfg)
-{
-    esp_camera_deinit();
-    vTaskDelay(pdMS_TO_TICKS(5)); // Allow power stabilization
-
-    // Retry with exponential backoff
-    for (int retry = 0; retry < 3; retry++)
-    {
-        log_heap_stats("Before cam init");
-        esp_err_t err = esp_camera_init(cfg);
-        log_heap_stats("After cam init");
-        if (err == ESP_OK)
-        {
-            sensor = esp_camera_sensor_get();
-            return ESP_OK;
-        }
-        ESP_LOGE(TAG, "Camera init failed 0x%x (attempt %d)", err, retry + 1);
-        esp_camera_deinit();
-        vTaskDelay(pdMS_TO_TICKS(100 * (retry + 1)));
-    }
-
-    // Final attempt without delay
-    esp_camera_deinit();
-    log_heap_stats("before cam init");
-    esp_err_t err = esp_camera_init(cfg);
-    log_heap_stats("After cam init");
-    if (err == ESP_OK)
-    {
-        sensor = esp_camera_sensor_get();
-        return ESP_OK;
-    }
-    ESP_LOGE(TAG, "Final camera init failure 0x%x", err);
-    return ESP_FAIL;
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Config builders (called once in init)
-// ──────────────────────────────────────────────────────────────────────────────
-static void build_configs(void)
-{
-    // base template
-    camera_config_t base = {
-        .pin_pwdn = PWDN_GPIO_NUM,
-        .pin_reset = RESET_GPIO_NUM,
-        .pin_xclk = XCLK_GPIO_NUM,
-        .pin_sccb_sda = SIOD_GPIO_NUM,
-        .pin_sccb_scl = SIOC_GPIO_NUM,
-        .pin_d7 = Y9_GPIO_NUM,
-        .pin_d6 = Y8_GPIO_NUM,
-        .pin_d5 = Y7_GPIO_NUM,
-        .pin_d4 = Y6_GPIO_NUM,
-        .pin_d3 = Y5_GPIO_NUM,
-        .pin_d2 = Y4_GPIO_NUM,
-        .pin_d1 = Y3_GPIO_NUM,
-        .pin_d0 = Y2_GPIO_NUM,
-        .pin_vsync = VSYNC_GPIO_NUM,
-        .pin_href = HREF_GPIO_NUM,
-        .pin_pclk = PCLK_GPIO_NUM,
-        .ledc_channel = LEDC_CHANNEL_0,
-        .ledc_timer = LEDC_TIMER_0,
-        .fb_count = 1,
-        .fb_location = CAMERA_FB_IN_PSRAM,
-    };
-
-    cfg_low = base;
-    cfg_high = base;
-
-    // Low‑res motion config
-    cfg_low.xclk_freq_hz = 10000000; // slower clock saves power
-    cfg_low.pixel_format = PIXFORMAT_RGB565;
-    cfg_low.frame_size = FRAMESIZE_SVGA; // 320×240
-    cfg_low.jpeg_quality = 0;            // ignored
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
 // Public API
 // ──────────────────────────────────────────────────────────────────────────────
+// Function prototypes
+esp_err_t camera_manager_capture(camera_fb_t *fb, time_t ts);
 
-esp_err_t camera_manager_init(void)
+bool camera_manager_motion_loop(float thresh, time_t *stamp, camera_fb_t **fb_out)
 {
-    cam_mux = xSemaphoreCreateMutex();
-    if (!cam_mux)
-        return ESP_ERR_NO_MEM;
-
-    build_configs();
-    log_heap_stats("Before cam init");
-    esp_err_t err = esp_camera_init(&cfg_low);
-    log_heap_stats("After cam init");
-    if (err != ESP_OK)
+    if (!fb_out)
     {
-        return err;
+        ESP_LOGE(TAG, "Invalid fb_out parameter");
+        return false;
     }
 
-    // Initialise background model for motion detection (QVGA dims)
-    initialize_background_model(320, 240);
-    return ESP_OK;
-}
-
-bool camera_manager_motion_loop(float thresh, time_t *stamp)
-{
-    cam_profile_t prof = {0};
-    prof.hit = esp_timer_get_time();
+    *fb_out = NULL; // Initialize to NULL
 
     if (xSemaphoreTake(cam_mux, 0) != pdTRUE)
         return false;
+
     sensor_gate(true);
     camera_fb_t *fb = esp_camera_fb_get();
     bool hit = false;
+
     if (fb)
     {
-        hit = detect_motion(fb, thresh, stamp);
-        esp_camera_fb_return(fb);
+        // Allocate temporary buffer for extracted Y-plane
+        uint8_t *y_plane = malloc(fb->width * fb->height); // 1 byte per pixel
+        if (!y_plane)
+        {
+            ESP_LOGE(TAG, "Failed to allocate Y-plane buffer");
+            esp_camera_fb_return(fb);
+            sensor_gate(false);
+            xSemaphoreGive(cam_mux);
+            return false;
+        }
+
+        // Extract Y channel from YUV422 buffer
+        const uint8_t *src = fb->buf;
+        for (int y = 0; y < fb->height; y++)
+        {
+            const uint8_t *row = src + y * fb->width * 2;
+            for (int x = 0; x < fb->width; x++)
+            {
+                y_plane[y * fb->width + x] = row[x * 2]; // pick Y0 or Y1
+            }
+        }
+
+        // Optional: Downscale from SVGA (800x600) to QVGA (320x240) if you want less CPU
+        uint8_t *qvga_buf = malloc(320 * 240);
+        if (!qvga_buf)
+        {
+            ESP_LOGE(TAG, "Failed to allocate QVGA buffer");
+            free(y_plane);
+            esp_camera_fb_return(fb);
+            sensor_gate(false);
+            xSemaphoreGive(cam_mux);
+            return false;
+        }
+
+        // Resize using nearest-neighbor downsampling
+        const int32_t x_ratio = (fb->width << 16) / 320;
+        const int32_t y_ratio = (fb->height << 16) / 240;
+        for (int y = 0; y < 240; y++)
+        {
+            int32_t sy = (y * y_ratio) >> 16;
+            for (int x = 0; x < 320; x++)
+            {
+                int32_t sx = (x * x_ratio) >> 16;
+                qvga_buf[y * 320 + x] = y_plane[sy * fb->width + sx];
+            }
+        }
+
+        free(y_plane); // Done with full-size Y-plane
+
+        // Create raw frame wrapper
+
+        hit = detect_motion(qvga_buf, 320, 240, thresh, stamp);
+        // if (hit)
+        // {
+        //     char filepath[128];
+        //     snprintf(filepath, sizeof(filepath), "%s/spaia/%lld.pgm", MOUNT_POINT, (long long)stamp);
+        //     save_grayscale_image(qvga_buf, 320, 240, filepath);
+        // }
+
+        free(qvga_buf); // Always free
+
+        if (hit)
+        {
+            // Motion detected, pass original fb to caller
+            *fb_out = fb;
+            // Caller is responsible for esp_camera_fb_return and xSemaphoreGive
+        }
+        else
+        {
+            // No motion, clean up
+            esp_camera_fb_return(fb);
+            sensor_gate(false);
+            xSemaphoreGive(cam_mux);
+        }
     }
-    sensor_gate(false);
-    xSemaphoreGive(cam_mux);
+    else
+    {
+        sensor_gate(false);
+        xSemaphoreGive(cam_mux);
+    }
+
     return hit;
 }
 
-esp_err_t camera_manager_capture(time_t ts, cam_profile_t *prof)
+esp_err_t camera_manager_capture(camera_fb_t *fb, time_t ts)
 {
-    if (!prof)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    // Log heap before capture to diagnose memory issues
     log_heap_stats("Before capture");
 
     esp_err_t rc = ESP_FAIL;
-    camera_fb_t *fb = NULL;
     FILE *file = NULL;
     char path[64] = {0};
     uint8_t *jpg_buf = NULL;
     size_t jpg_len = 0;
     bool jpg_converted = false;
 
-    /* ─── 1. Enter critical section ─────────────────────────────── */
-    if (xSemaphoreTake(cam_mux, portMAX_DELAY) != pdTRUE)
-    {
-        return ESP_ERR_TIMEOUT;
-    }
-    sensor_gate(true);
-
-    /* ─── 2. Switch to high-res mode ────────────────────────────── */
-    sensor = esp_camera_sensor_get();
-    if (!sensor)
-    {
-        ESP_LOGE(TAG, "Failed to get sensor handle");
-        rc = ESP_ERR_NOT_FOUND;
-        goto cleanup;
-    }
-
-    // Direct mode switch without reinit
-    sensor->set_framesize(sensor, FRAMESIZE_SXGA);   // High-res
-    sensor->set_quality(sensor, 10);                 // Lower is better quality (0-63)
-    sensor->set_gainceiling(sensor, GAINCEILING_4X); // Adjust gain for better image
-
-    // Small delay to let sensor registers update
-    vTaskDelay(pdMS_TO_TICKS(20));
-    prof->hi_ready = esp_timer_get_time();
-
-    /* ─── 3. Grab a frame ───────────────────────────────────────── */
-    // Clear frame buffer before capture
-    esp_camera_fb_return(NULL); // Flush any pending frames
-
-    // Take multiple frames to ensure buffer is fresh
-    camera_fb_t *dummy = esp_camera_fb_get();
-    if (dummy)
-    {
-        esp_camera_fb_return(dummy); // Discard first frame which may be corrupted
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
-    fb = esp_camera_fb_get();
     if (!fb)
     {
-        ESP_LOGE(TAG, "Camera capture failed");
-        rc = ESP_ERR_NO_MEM;
-        goto cleanup;
+        ESP_LOGE(TAG, "Null frame buffer provided");
+        return ESP_ERR_INVALID_ARG;
     }
-    prof->fb_ok = esp_timer_get_time();
 
-    /* ─── 4. Handle JPEG conversion if needed ────────────────────── */
-    if (fb->format == PIXFORMAT_JPEG)
+    /* ─── JPEG Handling ────────────────────────────────────────── */
+    const uint8_t *final_jpg = fb->buf;
+    size_t final_len = fb->len;
+
+    if (fb->format != PIXFORMAT_JPEG)
     {
-        jpg_buf = fb->buf;
-        jpg_len = fb->len;
-        ESP_LOGI(TAG, "Using direct JPEG from camera: %d bytes", jpg_len);
-    }
-    else
-    {
-        ESP_LOGI(TAG, "Converting to JPEG from format %d", fb->format);
-        // Try using a higher quality for better results - 95 instead of 80
-        if (!frame2jpg(fb, 95 /*quality*/, &jpg_buf, &jpg_len))
+        if (!frame2jpg(fb, 85, &jpg_buf, &jpg_len))
         {
             ESP_LOGE(TAG, "JPEG conversion failed");
             rc = ESP_FAIL;
             goto cleanup;
         }
         jpg_converted = true;
-        ESP_LOGI(TAG, "JPEG conversion successful: %d bytes", jpg_len);
+        final_jpg = jpg_buf;
+        final_len = jpg_len;
     }
 
-    /* ─── 5. Save to SD card ──────────────────────────────────── */
-    snprintf(path, sizeof(path), "%s/spaia/%lld.jpg", MOUNT_POINT, (long long)ts);
-    file = fopen(path, "wb");
-    if (!file)
+    /* ─── JPEG Validation (Safe) ──────────────────────────────── */
+    size_t header_offset = 0;
+    if (final_len < 2 || final_jpg[0] != 0xFF || final_jpg[1] != 0xD8)
     {
-        ESP_LOGE(TAG, "Failed to open file: %s", path);
+        for (size_t i = 0; i < final_len - 1; i++)
+        {
+            if (final_jpg[i] == 0xFF && final_jpg[i + 1] == 0xD8)
+            {
+                header_offset = i;
+                break;
+            }
+        }
+    }
+
+    /* ─── File Writing ───────────────────────────────────────── */
+    snprintf(path, sizeof(path), "%s/spaia/%lld.jpg", MOUNT_POINT, (long long)ts);
+    if (!(file = fopen(path, "wb")))
+    {
+        ESP_LOGE(TAG, "Failed to open %s", path);
         rc = ESP_ERR_NOT_FOUND;
         goto cleanup;
     }
 
-    // Add JPEG header validation and correction if needed
-    if (jpg_len < 2 || jpg_buf[0] != 0xFF || jpg_buf[1] != 0xD8)
+    // Write from validated offset
+    size_t write_len = final_len - header_offset;
+    size_t written = fwrite(final_jpg + header_offset, 1, write_len, file);
+
+    if (written != write_len)
     {
-        ESP_LOGW(TAG, "Invalid JPEG data - missing SOI marker, attempting recovery");
-
-        // Try to locate a valid JPEG header in the buffer
-        bool found_header = false;
-        for (size_t i = 0; i < jpg_len - 1; i++)
-        {
-            if (jpg_buf[i] == 0xFF && jpg_buf[i + 1] == 0xD8)
-            {
-                ESP_LOGI(TAG, "Found valid JPEG header at offset %d", i);
-                jpg_buf += i;
-                jpg_len -= i;
-                found_header = true;
-                break;
-            }
-        }
-
-        if (!found_header)
-        {
-            ESP_LOGE(TAG, "Could not find valid JPEG header");
-            rc = ESP_FAIL;
-            goto cleanup;
-        }
-    }
-
-    // Check for valid JPEG trailer
-    if (jpg_len < 2 || jpg_buf[jpg_len - 2] != 0xFF || jpg_buf[jpg_len - 1] != 0xD9)
-    {
-        ESP_LOGW(TAG, "JPEG may be missing EOI marker");
-    }
-
-    ESP_LOGI(TAG, "Writing %d bytes to file", jpg_len);
-    size_t written = fwrite(jpg_buf, 1, jpg_len, file);
-    if (written != jpg_len)
-    {
-        ESP_LOGE(TAG, "SD write failed: wrote %d of %d bytes", written, jpg_len);
+        ESP_LOGE(TAG, "SD write failed: %d/%d", written, write_len);
         rc = ESP_FAIL;
         goto cleanup;
     }
 
-    // Ensure data is flushed to disk
     fflush(file);
-
     fclose(file);
     file = NULL;
 
     upload_manager_notify_new_file(path);
-    prof->file_ok = esp_timer_get_time();
     rc = ESP_OK;
 
 cleanup:
-    /* ─── 6. Cleanup resources ─────────────────────────────────── */
     if (file)
     {
         fclose(file);
         if (rc != ESP_OK)
-        {
             remove(path);
-        }
     }
-
-    if (jpg_converted && jpg_buf)
-    {
+    if (jpg_converted)
         free(jpg_buf);
-    }
 
-    if (fb)
-    {
-        esp_camera_fb_return(fb);
-    }
+    // Note: We don't return the frame buffer here as it's managed by the caller
 
-    // Restore low-res mode without reinit
-    if (sensor)
-    {
-        sensor->set_framesize(sensor, FRAMESIZE_QVGA);
-        sensor->set_quality(sensor, 30); // Can be lower quality for motion detection
-    }
-    sensor_gate(false);
-
-    // Always ensure timing is captured
-    if (prof->file_ok == 0)
-    {
-        prof->file_ok = esp_timer_get_time();
-    }
-
-    xSemaphoreGive(cam_mux);
     return rc;
+}
+esp_err_t camera_manager_init(void)
+{
+    cam_mux = xSemaphoreCreateMutex();
+    if (!cam_mux)
+        return ESP_ERR_NO_MEM;
+    log_heap_stats("Before cam init");
+    esp_err_t err = esp_camera_init(&cfg);
+    log_heap_stats("After cam init");
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+    // Initialise background model for motion detection (QVGA dims)
+    initialize_background_model(320, 240);
+    return ESP_OK;
 }
 // ──────────────────────────────────────────────────────────────────────────────
 // Background task – replacement for old motion_detection_task/createCameraTask
@@ -402,18 +367,29 @@ static void camera_worker_task(void *pv)
         cam_profile_t prof = {0};
         prof.hit = esp_timer_get_time(); // A: time of motion detection
 
-        if (camera_manager_motion_loop(MOTION_THRESHOLD, &ts))
+        camera_fb_t *fb = NULL;
+        if (camera_manager_motion_loop(MOTION_THRESHOLD, &ts, &fb))
         {
             ESP_LOGI(TAG, "motion → capture");
-            camera_manager_capture(ts, &prof);
 
-            // Ensure final timestamp is recorded even on error
-            if (prof.file_ok == 0)
-                prof.file_ok = esp_timer_get_time(); // fallback
+            // The frame buffer and mutex are held by camera_manager_motion_loop
+            // when motion is detected
+            prof.fb_ok = esp_timer_get_time(); // C: time when frame is ready
+
+            // Process the captured frame
+            esp_err_t result = camera_manager_capture(fb, ts);
+
+            // Return the frame buffer and release the mutex
+            esp_camera_fb_return(fb);
+            sensor_gate(false);
+            xSemaphoreGive(cam_mux);
+
+            prof.file_ok = esp_timer_get_time(); // D: time when file is written
 
             log_profile(&prof); // <── see the lag breakdown
             vTaskDelay(pdMS_TO_TICKS(POST_SHOT_DELAY));
         }
+
         vTaskDelay(pdMS_TO_TICKS(MOTION_LOOP_DELAY));
     }
 }

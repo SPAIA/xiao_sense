@@ -89,7 +89,7 @@ void upload_folder()
             // ESP_LOGI("MAIN", "Stack high watermark before queue: %d", stack_high_watermark);
 
             upload_manager_notify_new_file(file_list[i]);
-
+            vTaskDelay(pdMS_TO_TICKS(100));
             // Monitor stack usage after queuing
             // stack_high_watermark = uxTaskGetStackHighWaterMark(NULL);
             // ESP_LOGI("MAIN", "Stack high watermark after queue: %d", stack_high_watermark);

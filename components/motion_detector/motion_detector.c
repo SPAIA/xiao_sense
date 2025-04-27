@@ -10,14 +10,14 @@
 static const char *detectorTag = "detector";
 
 // Configuration parameters
-#define ALPHA 0.06f         // lower numbers respond to quicker movements, higher numbers reduce noise sensitivity
+#define ALPHA 0.1f          // lower numbers respond to quicker movements, higher numbers reduce noise sensitivity
 #define FRAME_INIT_COUNT 20 // Number of frames to capture before starting motion detection
 #define MAX_COMPONENTS 30
-#define NEIGHBORHOOD 1         // defines 8-connected neighborhood
-#define MIN_COMPONENT_PIXELS 5 // Minimum pixel count for a valid component
-#define MAX_BOX_AREA 10000     // Maximum area for a valid bounding box
-#define MIN_BOX_AREA 200       // Minimum area for a valid bounding box
-#define IOU_THRESHOLD 0.3      // Threshold for IoU-based box merging
+#define NEIGHBORHOOD 1          // defines 8-connected neighborhood
+#define MIN_COMPONENT_PIXELS 20 // Minimum pixel count for a valid component
+#define MAX_BOX_AREA 10000      // Maximum area for a valid bounding box
+#define MIN_BOX_AREA 30         // Minimum area for a valid bounding box
+#define IOU_THRESHOLD 0.4       // Threshold for IoU-based box merging
 
 // External queue for sensor data
 extern QueueHandle_t sensor_data_queue;
@@ -39,19 +39,6 @@ typedef struct
 // Global variables
 BackgroundModel bg_model = {NULL, 0, 0, false};
 static int frame_counter = 0; // Frame counter for initialization
-
-// Utility function to convert RGB565 to grayscale
-static inline uint8_t rgb565_to_gray(uint16_t p)
-{
-    uint8_t r = (p >> 11) & 0x1F; // 5 bits
-    uint8_t g = (p >> 5) & 0x3F;  // 6 bits
-    uint8_t b = p & 0x1F;         // 5 bits
-    // Expand to 8-bit range and apply integer-only BT.601 weights
-    r <<= 3;
-    g <<= 2;
-    b <<= 3;
-    return (r * 30 + g * 59 + b * 11) / 100; // ≈Y'
-}
 
 // Initialize background model
 void initialize_background_model(size_t width, size_t height)
@@ -76,48 +63,46 @@ void initialize_background_model(size_t width, size_t height)
 }
 
 // Update background model with new frame
-void update_background_model(camera_fb_t *frame)
+void update_background_model(const uint8_t *pixels, size_t width, size_t height)
 {
-    if (!frame)
+    if (!pixels || width == 0 || height == 0)
     {
-        ESP_LOGE(detectorTag, "Invalid frame provided to update_background_model");
+        ESP_LOGE(detectorTag, "Invalid grayscale input to update_background_model");
         return;
     }
 
-    if (!bg_model.background || bg_model.width != frame->width || bg_model.height != frame->height)
+    if (!bg_model.background || bg_model.width != width || bg_model.height != height)
     {
-        initialize_background_model(frame->width, frame->height);
+        initialize_background_model(width, height);
     }
 
     if (frame_counter < FRAME_INIT_COUNT)
     {
-        // During initialization, just copy the frame data
-        uint16_t *pix = (uint16_t *)frame->buf;
-        size_t pixels = frame->width * frame->height;
-
-        for (size_t p = 0; p < pixels; p++)
+        if (frame_counter == 0)
         {
-            bg_model.background[p] = rgb565_to_gray(pix[p]);
+            memcpy(bg_model.background, pixels, width * height);
         }
+        else
+        {
+            for (size_t i = 0; i < width * height; i++)
+            {
+                bg_model.background[i] = (bg_model.background[i] * frame_counter + pixels[i]) / (frame_counter + 1);
+            }
+        }
+        frame_counter++;
 
-        frame_counter++; // Increment counter with each frame
         if (frame_counter >= FRAME_INIT_COUNT)
         {
-            bg_model.initialized = true; // Mark the background as initialized after enough frames
+            bg_model.initialized = true;
             ESP_LOGI(detectorTag, "Background model initialized after %d frames", frame_counter);
         }
-        return; // Skip background update and motion detection until initialized
+        return;
     }
 
-    // Update the background model using running average
-    size_t pixels = frame->width * frame->height;
-    uint16_t *pix = (uint16_t *)frame->buf;
-
-    for (size_t p = 0; p < pixels; p++)
+    // Update background model using exponential moving average
+    for (size_t i = 0; i < width * height; i++)
     {
-        uint8_t cur = rgb565_to_gray(pix[p]);
-        // Adjust ALPHA if the background update is too fast or slow
-        bg_model.background[p] = (uint8_t)((1 - ALPHA) * bg_model.background[p] + ALPHA * cur);
+        bg_model.background[i] = (uint8_t)((1.0f - ALPHA) * bg_model.background[i] + ALPHA * pixels[i]);
     }
 }
 
@@ -273,14 +258,6 @@ void filter_and_merge_boxes(BoundingBox *boxes, size_t *box_count, float iou_thr
     }
 }
 
-// Optional: Log bounding box for debugging
-void draw_bounding_box(camera_fb_t *frame, BoundingBox box)
-{
-    // This is a placeholder for actual drawing logic
-    ESP_LOGI(detectorTag, "Bounding Box - x_min: %zu, y_min: %zu, x_max: %zu, y_max: %zu",
-             box.x_min, box.y_min, box.x_max, box.y_max);
-}
-
 // Convert bounding boxes to JSON string
 char *boxes_to_json(BoundingBox *boxes, size_t box_count)
 {
@@ -357,29 +334,28 @@ char *boxes_to_json(BoundingBox *boxes, size_t box_count)
 }
 
 // Main motion detection function
-bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detection_timestamp)
+bool detect_motion(const uint8_t *pixels, size_t width, size_t height, float threshold, time_t *detection_timestamp)
 {
-    if (!current_frame)
+    if (!pixels || width == 0 || height == 0)
     {
-        ESP_LOGE(detectorTag, "Null frame provided to detect_motion");
+        ESP_LOGE(detectorTag, "Invalid grayscale input");
         return false;
     }
 
-    if (!bg_model.background || bg_model.width != current_frame->width || bg_model.height != current_frame->height)
+    // Initialize background if needed
+    if (!bg_model.background || bg_model.width != width || bg_model.height != height)
     {
-        ESP_LOGD(detectorTag, "Frame error or background model not initialized");
-        return false;
+        initialize_background_model(width, height);
     }
 
-    // Update the background model first
-    update_background_model(current_frame);
+    update_background_model(pixels, width, height);
 
-    // Skip detection if background model is not fully initialized
+    // Normal background update
+
     if (!bg_model.initialized)
     {
         return false;
     }
-
     // Declare local variables
     size_t max_boxes = 30;
     size_t box_count = 0;
@@ -391,30 +367,25 @@ bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detectio
     }
 
     // Allocate memory for tracking changed pixels
-    size_t *pixel_x = (size_t *)malloc(current_frame->width * current_frame->height * sizeof(size_t));
-    size_t *pixel_y = (size_t *)malloc(current_frame->width * current_frame->height * sizeof(size_t));
+    size_t *pixel_x = malloc(width * height * sizeof(size_t));
+    size_t *pixel_y = malloc(width * height * sizeof(size_t));
 
     if (!pixel_x || !pixel_y)
     {
         ESP_LOGE(detectorTag, "Failed to allocate memory for pixel tracking");
         free(boxes);
-        if (pixel_x)
-            free(pixel_x);
-        if (pixel_y)
-            free(pixel_y);
+        free(pixel_x);
+        free(pixel_y);
         return false;
     }
 
     int changed_pixels = 0;
-    size_t width = current_frame->width;
-    size_t height = current_frame->height;
-    size_t pixels = width * height;
-    uint16_t *pix = (uint16_t *)current_frame->buf;
+    size_t total_pixels = width * height;
 
     // Track positions of changed pixels
-    for (size_t i = 0; i < pixels; i++)
+    for (size_t i = 0; i < total_pixels; i++)
     {
-        uint8_t cur = rgb565_to_gray(pix[i]);
+        uint8_t cur = pixels[i];
         if (abs(bg_model.background[i] - cur) > threshold)
         {
             changed_pixels++;
@@ -531,7 +502,7 @@ bool detect_motion(camera_fb_t *current_frame, float threshold, time_t *detectio
                     size_t nidx = ny * width + nx;
 
                     // Check if this neighboring pixel is also changed
-                    uint8_t neighbor_cur = rgb565_to_gray(pix[nidx]);
+                    uint8_t neighbor_cur = pixels[nidx];
                     bool neighbor_changed = abs(bg_model.background[nidx] - neighbor_cur) > threshold;
 
                     if (neighbor_changed && labels[nidx] == 0)
